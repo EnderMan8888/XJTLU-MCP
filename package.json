@@ -1,0 +1,35 @@
+{
+  "name": "xjtlu-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "XJTLU campus hub for AMS attendance, eBridge timetables and library seat reservations",
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "build": "npm run typecheck && electron-vite build",
+    "install:electron": "node node_modules/electron/install.js",
+    "start": "node scripts/start.mjs",
+    "package:win": "npm run build && node scripts/package-windows.mjs"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^45.2.1",
+    "electron-vite": "^6.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
