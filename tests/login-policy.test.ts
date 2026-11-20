@@ -13,6 +13,9 @@ class TestElement {
   placeholder = ''
   autocomplete = ''
   checked = false
+  visibility = 'visible'
+  ariaLabel: string | null = null
+  getAttribute(name: string): string | null { return name === 'aria-label' ? this.ariaLabel : null }
   getBoundingClientRect(): { width: number; height: number } { return { width: 100, height: 20 } }
 }
 class TestInput extends TestElement {
@@ -45,6 +48,7 @@ function fixture() {
       }
     },
     HTMLInputElement: TestInput,
+    getComputedStyle: (element: TestElement) => ({ visibility: element.visibility }),
     Event: class { type: string; constructor(type: string) { this.type = type } },
     setTimeout: ((callback: () => void) => { queueMicrotask(callback) }) as unknown as typeof setTimeout
   }
@@ -57,6 +61,9 @@ describe('automatic school login', () => {
     assert.equal(isCredentialPage('https://uim.xjtlu.edu.cn/esc-sso/login/page?lang=en'), true)
     for (const url of ['http://uim.xjtlu.edu.cn/esc-sso/login/page', 'https://uim.xjtlu.edu.cn.evil.example/esc-sso/login/page', 'https://ams.xjtlu.edu.cn/esc-sso/login/page', 'https://uim.xjtlu.edu.cn/other', 'https://user:password@uim.xjtlu.edu.cn/esc-sso/login/page', 'invalid']) assert.equal(isCredentialPage(url), false)
     assert.equal(isAuthenticationOrigin('https://uim.xjtlu.edu.cn/mfa'), true)
+    assert.equal(isAuthenticationOrigin('https://sso.xjtlu.edu.cn/bind'), true)
+    assert.equal(isCredentialPage('https://sso.xjtlu.edu.cn/esc-sso/login/page'), false)
+    assert.equal(isAuthenticationOrigin('https://sso.xjtlu.edu.cn:444/bind'), false)
     assert.equal(isAuthenticationOrigin('https://uim.xjtlu.edu.cn.evil.example/mfa'), false)
   })
 
@@ -106,6 +113,43 @@ describe('automatic school login', () => {
     context.setTimeout = ((callback: () => void) => { const captcha = new TestInput(); captcha.placeholder = '验证码'; extra.push(captcha); callback() }) as unknown as typeof setTimeout
     assert.equal(await vm.runInNewContext(buildAutomaticLoginScript(saved, 'late-challenge'), context), 'verification-required')
     assert.equal(button.clicks, 0)
+  })
+
+  it('recognizes a risky login prompt before a code field is visible', async () => {
+    for (const text of ['检测到异地登录，请选择一种方式完成二次认证', 'Risky login. Secondary authentication required.', 'Sign in from a different location. Authentication failed.']) {
+      const { username, password, button, context } = fixture()
+      context.document.body.innerText = text
+      assert.equal(vm.runInNewContext(buildLoginInspectionScript(), context), 'verification-required')
+      assert.equal(await vm.runInNewContext(buildAutomaticLoginScript(saved, 'risk'), context), 'verification-required')
+      assert.equal(username.value, '')
+      assert.equal(password.value, '')
+      assert.equal(button.clicks, 0)
+    }
+  })
+
+  it('recognizes a visible code field on the second official authentication origin', async () => {
+    const { context, extra, username, password, button } = fixture()
+    context.location.origin = 'https://sso.xjtlu.edu.cn'
+    const input = new TestInput()
+    input.name = 'validateCode'
+    extra.push(input)
+    assert.equal(vm.runInNewContext(buildLoginInspectionScript(), context), 'verification-required')
+    assert.equal(await vm.runInNewContext(buildAutomaticLoginScript(saved, 'secondary-origin'), context), 'wrong-page')
+    assert.equal(username.value, '')
+    assert.equal(password.value, '')
+    assert.equal(input.value, '')
+    assert.equal(button.clicks, 0)
+  })
+
+  it('ignores a code input that is present but visually hidden', () => {
+    const { context, extra } = fixture()
+    const input = new TestInput()
+    input.ariaLabel = '邮箱验证码'
+    input.visibility = 'hidden'
+    extra.push(input)
+    assert.equal(vm.runInNewContext(buildLoginInspectionScript(), context), 'credentials')
+    input.visibility = 'visible'
+    assert.equal(vm.runInNewContext(buildLoginInspectionScript(), context), 'verification-required')
   })
 
   it('does not accept an unchecked agreement on the user’s behalf', async () => {

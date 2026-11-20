@@ -2,7 +2,8 @@ import {BrowserWindow,session} from 'electron'
 import {LIBRARY_HOME,LIBRARY_ORIGIN} from '../shared/library'
 import type {ConnectionPhase} from '../shared/ams'
 import type {AccountService} from '../services/account-service'
-import {buildAutomaticLoginScript,buildLoginInspectionScript,isAuthenticationOrigin,isCredentialPage} from '../security/login-policy'
+import {buildAutomaticLoginScript,buildLoginInspectionScript,isAuthenticationOrigin,isCredentialPage,SCHOOL_VERIFICATION_MESSAGE} from '../security/login-policy'
+import {isAbortedNavigation,showSchoolLoginWindow} from './school-login-window'
 
 export interface LibraryAuth {token:string;accNo:number}
 export class LibraryLogin {
@@ -17,17 +18,18 @@ export class LibraryLogin {
   private automatic:Promise<unknown>|null=null
   private auth:LibraryAuth|null=null
   private phase:ConnectionPhase='idle'
+  private message=''
   constructor(private account:AccountService,private publish:(phase:ConnectionPhase,message:string)=>void){
     this.school.setPermissionRequestHandler((_w,_p,callback)=>callback(false));this.school.setPermissionCheckHandler(()=>false)
     this.school.on('will-download',event=>event.preventDefault())
   }
-  private status(phase:ConnectionPhase,message:string):void {this.phase=phase;this.publish(phase,message)}
+  private status(phase:ConnectionPhase,message:string):void {if(this.phase!==phase||this.message!==message){this.phase=phase;this.message=message;this.publish(phase,message)}}
   private stop():void{if(this.timer)clearInterval(this.timer);this.timer=null}
   private valid(g:number,win:BrowserWindow):boolean{return g===this.generation&&this.win===win&&!win.isDestroyed()}
   read():LibraryAuth|null{return this.auth?{...this.auth}:null}
-  private allowed(raw:string):boolean{try{const u=new URL(raw);return u.protocol==='https:'&&!u.username&&!u.password&&['seatbookings.xjtlu.edu.cn','uim.xjtlu.edu.cn','sso.xjtlu.edu.cn'].includes(u.hostname)}catch{return false}}
+  private allowed(raw:string):boolean{try{const u=new URL(raw);return isAuthenticationOrigin(raw)||(u.origin===LIBRARY_ORIGIN&&!u.username&&!u.password)}catch{return false}}
   async connect(show=false):Promise<void>{
-    if(this.timer){if(show)this.show();return}
+    if(this.timer){if(show||this.phase==='verification-required')this.show();return}
     this.generation++;const g=this.generation;this.credentialsGeneration++;this.auth=null;this.submitted=false;this.deadline=Date.now()+75_000
     this.win?.destroy()
     const win=new BrowserWindow({title:'西浦图书馆 · 官方认证',width:1180,height:820,show,autoHideMenuBar:true,webPreferences:{session:this.school,nodeIntegration:false,contextIsolation:true,sandbox:true,backgroundThrottling:false}})
@@ -39,9 +41,11 @@ export class LibraryLogin {
     this.status('authenticating','正在连接图书馆学校账号…')
     const tick=():void=>{void this.tick(g,win)}
     this.timer=setInterval(tick,750);win.webContents.on('did-finish-load',tick)
-    await win.loadURL(LIBRARY_HOME).catch(()=>{if(this.valid(g,win)){this.stop();this.status('error','图书馆页面加载失败，请检查网络后重新连接。')}})
+    await win.loadURL(LIBRARY_HOME).catch(error=>{
+      if(!isAbortedNavigation(error)&&this.valid(g,win)&&this.timer&&this.phase!=='verification-required'){this.stop();this.status('error','图书馆页面加载失败，请检查网络后重新连接。')}
+    })
   }
-  private attention(text:string):void{const first=this.phase!=='verification-required';this.status('verification-required',text);if(first)this.show()}
+  private attention(text:string):void{const first=this.phase!=='verification-required';this.submitted=true;this.status('verification-required',text);if(first)this.show()}
   private async tick(g:number,win:BrowserWindow):Promise<void>{
     if(!this.valid(g,win)||!this.timer||this.ticking||win.webContents.isLoadingMainFrame())return
     this.ticking=true
@@ -57,9 +61,9 @@ export class LibraryLogin {
       if(!isAuthenticationOrigin(url))return
       const state=await win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:buildLoginInspectionScript()}])
       if(!this.valid(g,win))return
-      if(state==='verification-required'){this.attention('图书馆登录需要验证码或二次验证，请在学校窗口完成。');return}
+      if(state==='verification-required'){this.attention(SCHOOL_VERIFICATION_MESSAGE);return}
+      if(this.phase==='verification-required')return
       if(state==='login-error'){this.stop();this.status('error','学校登录未通过，请到首页核对账号密码。');return}
-      if(this.phase==='verification-required'){this.deadline=Date.now()+75_000;this.status('authenticating','正在继续学校认证…')}
       if(state!=='credentials'||this.submitted||!isCredentialPage(url))return
       const cg=this.credentialsGeneration,saved=await this.account.read().catch(()=>null)
       if(!this.valid(g,win)||cg!==this.credentialsGeneration)return
@@ -68,12 +72,18 @@ export class LibraryLogin {
       const task=win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:buildAutomaticLoginScript(saved,`library:${g}:${cg}`)}]);this.automatic=task
       let result:unknown;try{result=await task}finally{if(this.automatic===task)this.automatic=null}
       if(!this.valid(g,win)||cg!==this.credentialsGeneration)return
-      if(result==='verification-required'){this.submitted=false;this.attention('请在学校窗口完成验证。')}
+      if(result==='verification-required')this.attention(SCHOOL_VERIFICATION_MESSAGE)
       else if(!['submitted','already-submitted','wrong-page','cancelled'].includes(String(result)))this.attention('登录页面需要确认，请在学校窗口完成。')
     }catch{/* SSO navigation can replace the document while it is being inspected. */}
-    finally{this.ticking=false;if(this.valid(g,win)&&this.timer&&Date.now()>this.deadline&&this.phase!=='verification-required'){this.stop();this.attention('学校认证等待较久，请在官方窗口查看并完成登录。')}}
+    finally{
+      this.ticking=false
+      if(this.valid(g,win)&&this.timer&&Date.now()>this.deadline&&this.phase!=='verification-required'){
+        if(isAuthenticationOrigin(win.webContents.getURL()))this.attention('学校认证还未结束。请在官方窗口查看提示并继续登录。')
+        else{this.stop();this.status('error','图书馆认证等待超时，请重新连接学校账号。')}
+      }
+    }
   }
-  show():void{this.win?.show();this.win?.focus()}
+  show():void{showSchoolLoginWindow(this.win)}
   async openSource():Promise<void>{if(this.win&&!this.win.isDestroyed()){this.show();return};await this.connect(true)}
   invalidate():void{this.auth=null;this.status('expired','学校登录已过期，请重新连接图书馆账号。')}
   async cancel():Promise<void>{this.credentialsGeneration++;const c=this.win?.webContents;if(c&&!c.isDestroyed()&&isAuthenticationOrigin(c.getURL()))await c.executeJavaScriptInIsolatedWorld(1001,[{code:'globalThis.__xjtluLoginAttempt=null'}]).catch(()=>{});await this.automatic?.catch(()=>{})}

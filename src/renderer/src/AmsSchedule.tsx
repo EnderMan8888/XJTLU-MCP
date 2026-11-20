@@ -46,7 +46,7 @@ export function AmsSchedule({state,ebridge,api,busy,run}:{state:AmsState;ebridge
             <td><span className={`attendance attendance-${status}`} title={record?.statusName||undefined}>{label}</span>{record?.attendance==='present'&&record.signTime&&<small>签到：{record.signTime}</small>}</td>
           </tr>
         })}</tbody></table></div>}
-      <div className="schedule-footer"><span>eBridge Timetable：{updatedAt(ebridge.timetableAt)}</span><span>Module 单节考勤核对：{updatedAt(source?.fetchedAt??null)}</span></div>
+      <div className="schedule-footer"><span>eBridge Timetable{ebridge.localCache.restored.includes('timetable') ? '（本地缓存）' : ''}：{updatedAt(ebridge.timetableAt)}</span><span>Module 单节考勤核对：{updatedAt(source?.fetchedAt??null)}</span></div>
     </section>
   </>
 }

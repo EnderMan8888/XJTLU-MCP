@@ -27,7 +27,7 @@ export function TodayCourses({ebridge,ams,busy,onRefresh,onAccount}:{ebridge:Ebr
           <td><strong>{course.room||'教室未提供'}</strong><small>{course.type||'类型未提供'}</small></td>
           <td><span className={`attendance attendance-${course.attendance}`} title={course.attendance==='unmatched'?'Module 中没有唯一匹配的同日、同课程、同上课时间记录。':course.statusName||undefined}>{course.attendance==='unavailable'&&ams.moduleAttendance?.loading?'正在核对…':course.attendance==='unavailable'&&ams.moduleAttendance?.issue?'暂不可用':attendance[course.attendance]}</span>{course.signTime&&<small>签到：{course.signTime}</small>}</td>
         </tr>)}</tbody></table></div>}
-      <div className="schedule-footer"><span>eBridge 课程：{updatedAt(ebridge.timetableAt)}</span><span>Module 核对：{updatedAt(ams.moduleAttendance?.fetchedAt??null)}</span></div>
+      <div className="schedule-footer"><span>eBridge 课表{ebridge.localCache.restored.includes('timetable') ? '（本地缓存）' : ''}：{updatedAt(ebridge.timetableAt)}</span><span>Module 核对：{updatedAt(ams.moduleAttendance?.fetchedAt??null)}</span></div>
     </section>
   </section>
 }

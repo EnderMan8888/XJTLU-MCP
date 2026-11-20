@@ -1,5 +1,8 @@
 import type { SavedCredentials } from '../shared/credentials.ts'
 
+const authenticationOrigins = ['https://uim.xjtlu.edu.cn', 'https://sso.xjtlu.edu.cn']
+export const SCHOOL_VERIFICATION_MESSAGE = '请在西浦官方窗口选择验证方式，输入短信、邮箱验证码或 OTP，再按学校页面提交。'
+
 export function isCredentialPage(raw: string): boolean {
   try {
     const url = new URL(raw)
@@ -8,17 +11,22 @@ export function isCredentialPage(raw: string): boolean {
 }
 
 export function isAuthenticationOrigin(raw: string): boolean {
-  try { const url = new URL(raw); return url.origin === 'https://uim.xjtlu.edu.cn' && !url.username && !url.password } catch { return false }
+  try { const url = new URL(raw); return authenticationOrigins.includes(url.origin) && !url.username && !url.password } catch { return false }
 }
 
 // These form containers and button class were observed in UIM's public
 // accountPsw.js. Inspect only visible DOM; return classifications, never page
 // text, passwords, challenge codes, or application internals.
-const domInspection = `
-  const shown = element => !!element && !element.hidden && element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0;
+const domInspection = String.raw`
+  const shown = element => {
+    if (!element || element.hidden || !element.getBoundingClientRect().width || !element.getBoundingClientRect().height) return false;
+    const visibility = getComputedStyle(element).visibility;
+    return visibility !== 'hidden' && visibility !== 'collapse';
+  };
   const inputs = [...document.querySelectorAll('input')].filter(shown);
   const bodyText = (document.body?.innerText || '').slice(0, 12000);
-  const challenge = inputs.some(input => input.autocomplete === 'one-time-code' || /captcha|otp|verification.?code|security.?code|验证码|动态码|短信/i.test([input.name, input.id, input.placeholder].join(' '))) ||
+  const riskyLogin = /异地登[录錄]|异常登[录錄]|风险登[录錄]|登[录錄]风险|二次(?:认证|验证)|二步验证|(?:risky|suspicious|abnormal|unusual)\s+(?:log\s*in|sign[ -]?in)|(?:log\s*in|sign[ -]?in)\s+from\s+(?:a\s+)?(?:new|different|unusual)\s+(?:location|device)|(?:secondary|multi[- ]factor)\s+authenticat/i.test(bodyText);
+  const challenge = riskyLogin || inputs.some(input => input.autocomplete === 'one-time-code' || /captcha|otp|(?:verify|validate|verification|security|sms|email)[-_ ]?code|验证码|动态码|短信/i.test([input.name, input.id, input.placeholder, input.getAttribute('aria-label')].join(' '))) ||
     [...document.querySelectorAll('iframe[src*="captcha"], [class*="captcha"], [id*="captcha"], [class*="geetest"], [class*="yidun"], [class*="turnstile"]')].some(shown) ||
     /验证码|动态口令|身份验证|二次验证|安全验证|人机验证|拖动.{0,5}滑块|verification code|one.time (?:code|password)|authenticator|two.(?:factor|step)|verify your identity|verify you are human|security verification|短信验证/i.test(bodyText);
   const loginError = /(?:incorrect|invalid).{0,24}(?:password|credentials|account)|用户名或密码|密码(?:错误|不正确)|账号.{0,8}(?:锁定|不存在)|account.{0,20}locked|authentication failed/i.test(bodyText);
@@ -31,7 +39,7 @@ const domInspection = `
 
 export function buildLoginInspectionScript(): string {
   return `(() => {
-    if (location.origin !== 'https://uim.xjtlu.edu.cn') return 'other-page';
+    if (!${JSON.stringify(authenticationOrigins)}.includes(location.origin)) return 'other-page';
     ${domInspection}
     return classify();
   })()`

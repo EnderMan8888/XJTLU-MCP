@@ -19,7 +19,7 @@ export const portalInspectionScript = `(() => {
   if (!allowed.includes(location.origin)) return null;
   const clean = s => (s || '').replace(/[\\uE000-\\uF8FF]/g,'').replace(/\\s+/g, ' ').trim().slice(0, 600);
   const visible = e => !e.hidden && e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0;
-  const relevant = /timetable|my module|module taking|module enrol|programme and module|exam|assessment|academic calendar|课程|课表|考试|校历/i;
+  const relevant = /timetable|my module|module taking|module enrol|programme and module|exam|assessment|academic calendar|academic records|component marks|module marks|results|成绩|课程|课表|考试|校历/i;
   const links = [...document.querySelectorAll('a[href]')].map(a => ({text:clean(a.innerText || a.textContent || a.getAttribute('title')), href:a.href})).filter(a => relevant.test(a.text));
   const tables = [...document.querySelectorAll('table')].map(table => {
     const allRows = [...table.rows];

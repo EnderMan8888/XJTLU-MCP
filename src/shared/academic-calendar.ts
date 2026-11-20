@@ -12,6 +12,15 @@ const calendar = {
 
 export function beijingDate(now=Date.now()):string { return new Date(now+8*3_600_000).toISOString().slice(0,10) }
 
+export function academicTermOn(date:string):EbridgeTerm|null {
+  for(const [year,terms] of Object.entries(calendar)) {
+    for(const semester of [1,2] as const) {
+      if(date>=terms[semester].from&&date<=terms[semester].until)return {year,semester}
+    }
+  }
+  return null
+}
+
 export function teachingDay(date:string,term:EbridgeTerm|null):{known:boolean;week:number|null;message:string|null} {
   if(!term)return {known:false,week:null,message:'等待确认 eBridge 课表所属学期。'}
   const year=calendar[term.year as keyof typeof calendar]

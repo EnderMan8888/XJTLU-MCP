@@ -1,0 +1,42 @@
+.ebridge-cache-setting { margin-top: 16px; padding: 16px 24px; }
+.ebridge-cache-setting label { display: flex; align-items: center; gap: 8px; width: fit-content; color: #53617c; font-size: 12px; cursor: pointer; }
+.ebridge-cache-setting input { margin: 0; flex: none; }
+.ebridge-cache-setting p { margin: 5px 0 0 23px; color: #68768f; font-size: 11px; }
+
+.ebridge-grades-toolbar{margin-bottom:22px;overflow:hidden}
+.ebridge-grade-heading{padding:22px 24px;display:flex;align-items:center;justify-content:space-between;gap:20px}
+.ebridge-grade-heading h2{font-size:16px;margin:0;color:#263b61}
+.ebridge-grade-heading p{font-size:12px;line-height:1.8;color:#8290a7;margin:7px 0 0}
+.ebridge-grade-heading .actions{flex-shrink:0;gap:14px}
+.ebridge-grade-heading button{font-size:12px}
+.ebridge-grade-views{display:flex;gap:8px;padding:0 24px 20px;flex-wrap:wrap}
+.ebridge-grade-views button{font-size:12px;padding:10px 16px;border-color:#e5eaf2;background:#f8fafd;color:#7c8ba5}
+.ebridge-grade-views button.active{border-color:#cad6ef;background:#eff3fb;color:#4964a0}
+.ebridge-grades-toolbar .module-filters{border-top:1px solid #edf0f6;margin:0;padding:18px 24px}
+.ebridge-grade-summary{display:flex;align-items:center;flex-wrap:wrap;gap:12px 24px;font-size:12px;color:#8a97aa;margin:22px 0 16px}
+.ebridge-grade-summary strong{font-size:17px;font-weight:600;color:#46618e;margin-right:4px}
+.ebridge-grade-updated{margin-left:auto;font-size:10px}
+.ebridge-grade-modules{display:flex;flex-direction:column;gap:18px}
+.ebridge-grade-module{overflow:hidden}
+.ebridge-grade-module-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px 24px;border-bottom:1px solid #e9edf4;background:#fbfcff}
+.ebridge-grade-module-heading>div{min-width:0}
+.ebridge-grade-code{display:block;font-size:12px;color:#5471a7;font-weight:600;margin-bottom:7px}
+.ebridge-grade-module-heading h3{font-size:14px;font-weight:600;line-height:1.7;color:#2e4265;margin:0;overflow-wrap:anywhere}
+.ebridge-grade-module-heading>span{font-size:11px;color:#92a0b4;flex-shrink:0}
+.ebridge-assessment-table{width:100%;min-width:600px}
+.ebridge-assessment-table th{font-size:11px}
+.ebridge-assessment-table td{font-size:12px;line-height:1.8}
+.ebridge-assessment-table th:first-child{width:50%}
+.ebridge-assessment-table td:first-child{color:#546784}
+.ebridge-assessment-table td:last-child{min-width:85px}
+.ebridge-mark-value{font-size:16px!important;color:#3c5987!important;font-weight:600}
+.ebridge-mark-pending{font-size:11px;color:#a0aabd}
+.ebridge-records-table{width:100%;min-width:870px}
+.ebridge-records-table td{font-size:12px}
+.ebridge-records-table td:nth-child(2){min-width:210px;max-width:300px}
+.ebridge-records-table .text-button{font-size:11px;padding:6px 0;white-space:nowrap}
+.ebridge-grade-detail>td{padding:16px 20px!important;background:#f8faff}
+.ebridge-grade-detail .ebridge-assessment-table{background:#fff;border:1px solid #e7edf6}
+.ebridge-grade-note{font-size:11px;color:#8c99ae;line-height:1.9;margin:20px 0}
+.ebridge-assessment-empty{padding:24px;font-size:12px;color:#95a0b4}
+@media(max-width:1050px){.ebridge-grade-heading{align-items:flex-start;flex-direction:column}.ebridge-grade-updated{margin-left:0;width:100%}.ebridge-grade-module-heading{align-items:flex-start}}

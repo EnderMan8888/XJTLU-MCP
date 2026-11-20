@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import type { EbridgeBridge, EbridgeExam, EbridgeState, EbridgeView } from '../../shared/ebridge'
 import { phases, updatedAt } from './presentation'
+import { EbridgeGradesPage } from './EbridgeGradesPage'
 const weekdays: Record<string,string> = {MON:'星期一',TUE:'星期二',WED:'星期三',THU:'星期四',FRI:'星期五',SAT:'星期六',SUN:'星期日'}
 const dayLabel = (day: string): string => weekdays[day.slice(0,3).toUpperCase()] || day
 const views: {key:EbridgeView; label:string; heading:string; source:string}[] = [
   {key:'courses',label:'课程信息',heading:'我的课程',source:'课程信息'},
   {key:'timetable',label:'Timetables',heading:'我的课表',source:'Timetables'},
-  {key:'exams',label:'考试安排',heading:'我的考试安排',source:'Timetables · 个人考试安排'}
+  {key:'exams',label:'考试安排',heading:'我的考试安排',source:'Timetables · 个人考试安排'},
+  {key:'grades',label:'成绩查询',heading:'成绩查询',source:'Academic Records'}
 ]
 
 export function EbridgePage({state, api, action, run, onAccount}: {state:EbridgeState; api:EbridgeBridge; action:boolean; run:(operation:()=>Promise<void>)=>Promise<void>; onAccount:()=>void}): React.JSX.Element {
@@ -16,7 +18,7 @@ export function EbridgePage({state, api, action, run, onAccount}: {state:Ebridge
   const [examDate, setExamDate] = useState('')
   const [semester, setSemester] = useState('')
   const [confirm, setConfirm] = useState(false)
-  const busy = action || state.phase === 'authenticating' || state.phase === 'loading'
+  const busy = action || state.phase === 'authenticating' || state.phase === 'loading' || state.grades.loading
   const query = search.trim().toLowerCase()
   const semesters = [...new Set(state.courses.map(c => c.semester).filter(Boolean))]
   const courses = state.courses.filter(c => (!semester || c.semester === semester) && `${c.code} ${c.title}`.toLowerCase().includes(query))
@@ -26,12 +28,26 @@ export function EbridgePage({state, api, action, run, onAccount}: {state:Ebridge
   const examDates = [...new Set(state.exams.map(e => e.date).filter(Boolean))]
   const activeExamDate = examDates.includes(examDate) ? examDate : ''
   const exams = state.exams.filter(e => (!activeExamDate || e.date === activeExamDate) && `${e.code} ${e.title} ${e.room} ${e.seat} ${e.area} ${e.entrance}`.toLowerCase().includes(query))
-  const fetched = {courses:state.coursesAt,timetable:state.timetableAt,exams:state.examsAt}[view]
+  const fetched = {courses:state.coursesAt,timetable:state.timetableAt,exams:state.examsAt,grades:state.grades.componentsAt ?? state.grades.recordsAt}[view]
   const current = views.find(v => v.key === view)!
   return <>
-    <div className="heading"><div><div className="eyebrow">EBRIDGE · ACADEMIC INFORMATION</div><h1>课程、课表与考试安排</h1><p>从 eBridge 读取教务信息，使用首页统一保存的学校账号。</p></div><div className="ams-icon">eB</div></div>
-    <section className="connection card"><div className="connection-top"><div><span className={`status status-${state.phase}`}><span />{phases[state.phase]}</span><h2>eBridge 连接</h2><p>{state.message}</p></div><div className="actions"><button disabled={!api || busy} onClick={() => state.phase === 'credentials-required' ? onAccount() : void run(() => state.phase === 'verification-required' ? api.showLogin() : api.connect())}>{state.phase === 'credentials-required' ? '设置学校账号' : state.phase === 'verification-required' ? '完成验证' : '连接 eBridge'}</button><button className="primary" disabled={!api || busy} onClick={() => void run(() => api.refresh())}>{busy ? '正在读取…' : '刷新教务信息'}</button></div></div><div className="connection-bottom"><span>◈ 首页统一管理账号</span><span>◈ 学校原始课程、课表与考试安排</span></div></section>
-    <div className="view-tabs" role="group" aria-label="eBridge 信息视图">{views.map(v => <button key={v.key} className={view === v.key ? 'active' : ''} aria-pressed={view === v.key} onClick={() => {setView(v.key); setSearch('')}}>{v.label}</button>)}</div>
+    <div className="heading"><div><div className="eyebrow">EBRIDGE · ACADEMIC INFORMATION</div><h1>课程、课表、考试与成绩</h1><p>从 eBridge 读取教务信息，使用首页统一保存的学校账号。</p></div><div className="ams-icon">eB</div></div>
+    <section className="connection card"><div className="connection-top"><div><span className={`status status-${state.phase}`}><span />{phases[state.phase]}</span><h2>eBridge 连接</h2><p>{state.message}</p></div><div className="actions"><button disabled={!api || busy} onClick={() => state.phase === 'credentials-required' ? onAccount() : void run(() => state.phase === 'verification-required' ? api.showLogin() : api.connect())}>{state.phase === 'credentials-required' ? '设置学校账号' : state.phase === 'verification-required' ? '完成验证' : '连接 eBridge'}</button><button className="primary" disabled={!api || busy} onClick={() => void run(() => view === 'grades' && state.phase === 'connected' ? api.loadGrades() : api.refresh())}>{busy ? '正在读取…' : view === 'grades' ? '查询 / 刷新成绩' : '刷新教务信息'}</button></div></div><div className="connection-bottom"><span>◈ 首页统一管理账号</span><span>◈ 学校原始教务信息与成绩</span></div></section>
+    <section className="card ebridge-cache-setting" aria-labelledby="ebridge-cache-title">
+      <label id="ebridge-cache-title">
+        <input type="checkbox" checked={state.localCache.enabled} disabled={!api || action} aria-describedby="ebridge-cache-description" onChange={event => {
+          const enabled = event.target.checked
+          void run(() => api.setLocalCache(enabled))
+        }} />
+        <strong>在本机保存课表、课程列表和考试安排</strong>
+      </label>
+      <p id="ebridge-cache-description">开启后，下次启动可先查看上次读取的结果。关闭后清除本地副本。</p>
+      {state.localCache.issue && <div className="notice" role="status">{state.localCache.issue}</div>}
+    </section>
+    <div className="view-tabs" role="group" aria-label="eBridge 信息视图">{views.map(v => <button key={v.key} className={view === v.key ? 'active' : ''} aria-pressed={view === v.key} onClick={() => {setView(v.key); setSearch(''); if (v.key === 'grades' && state.phase === 'connected' && !state.grades.componentsAt && !state.grades.recordsAt && !state.issues.grades && !busy) void run(() => api.loadGrades())}}>{v.label}</button>)}</div>
+    {view === 'grades' && <EbridgeGradesPage data={state.grades} phase={state.phase} api={api} busy={busy} run={run} />}
+    {view !== 'grades' && <>
+    {state.localCache.restored.includes(view) && <div className="notice" role="status">正在显示本地缓存，最近一次读取于 {updatedAt(fetched)}。</div>}
     {state.issues[view] && <div className="notice" role="status">{state.issues[view]}{fetched && ' 以下保留上次读取的数据。'}</div>}
     <div className="section-heading"><div><h2>{current.heading}</h2><span>{view === 'courses' ? `${state.courses.length} 门课程` : view === 'timetable' ? `${state.timetable.length} 条上课安排 · 按教学周重复` : `${state.exams.length} 场考试 · 时间 UTC+8（北京时间）`}</span></div><button className="text-button" disabled={!api || busy} onClick={() => void run(() => api.openSource(view))}>打开学校原页 ↗</button></div>
     <section className="schedule card"><div className="module-filters">{view === 'courses' && !!semesters.length && <label>学期<select value={semester} onChange={e => setSemester(e.target.value)}><option value="">全部学期</option>{semesters.map(s => <option key={s}>{s}</option>)}</select></label>}{view === 'timetable' && !!dates.length && <label>教学日<select value={activeDate} onChange={e => setDate(e.target.value)}>{dates.map(d=><option key={d} value={d}>{weekdays[d] || d}</option>)}</select></label>}{view === 'exams' && !!examDates.length && <label>考试日期<select value={activeExamDate} onChange={e => setExamDate(e.target.value)}><option value="">全部日期</option>{examDates.map(d => <option key={d} value={d}>{d}</option>)}</select></label>}<label className="course-search">{view === 'exams' ? '查找考试' : '查找课程'}<input value={search} onChange={e => setSearch(e.target.value)} placeholder={view === 'exams' ? '课程代码、名称、考场或座位号' : '课程代码、名称'} /></label></div>
@@ -41,8 +57,9 @@ export function EbridgePage({state, api, action, run, onAccount}: {state:Ebridge
       </>}
       <div className="schedule-footer"><span>来源：eBridge {current.source}</span><span>读取时间：{updatedAt(fetched)}</span></div>
     </section>
-    <footer className="page-footer"><p>{view === 'exams' ? '入场时间和开考时间分别展示，均使用学校标注的 UTC+8（北京时间）。' : view === 'timetable' ? '课表按星期与教学周展示；时间采用学校页面已预留课间移动时间的数值。' : '课程信息使用学校页面提供的学年与学期。'}</p><button className="text-button" disabled={!api || busy} onClick={() => setConfirm(true)}>断开 eBridge</button></footer>
-    {confirm && <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-labelledby="ebridge-disconnect"><h2 id="ebridge-disconnect">断开 eBridge？</h2><p>清除 eBridge 的会话与内存数据，首页保存的学校账号保留。</p><div className="actions"><button onClick={() => setConfirm(false)}>取消</button><button className="primary" onClick={() => {setConfirm(false); void run(() => api.disconnect())}}>断开 eBridge</button></div></div></div>}
+    </>}
+    <footer className="page-footer"><p>{view === 'grades' ? '分项成绩与课程总评分别来自学校对应页面；刷新失败时保留上次结果。' : view === 'exams' ? '入场时间和开考时间分别展示，均使用学校标注的 UTC+8（北京时间）。' : view === 'timetable' ? '课表按星期与教学周展示；时间采用学校页面已预留课间移动时间的数值。' : '课程信息使用学校页面提供的学年与学期。'}</p><button className="text-button" disabled={!api || busy} onClick={() => setConfirm(true)}>断开 eBridge</button></footer>
+    {confirm && <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-labelledby="ebridge-disconnect"><h2 id="ebridge-disconnect">断开 eBridge？</h2><p>清除 eBridge 的会话与页面数据，首页保存的学校账号保留。{state.localCache.enabled && ' 断开后也会关闭并清除本地缓存。'}</p><div className="actions"><button onClick={() => setConfirm(false)}>取消</button><button className="primary" onClick={() => {setConfirm(false); void run(() => api.disconnect())}}>断开 eBridge</button></div></div></div>}
   </>
 }
 

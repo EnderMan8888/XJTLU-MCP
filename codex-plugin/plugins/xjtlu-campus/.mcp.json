@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "xjtlu-campus": {
+      "type": "http",
+      "url": "http://127.0.0.1:39527/mcp",
+      "bearer_token_env_var": "XJTLU_CODEX_MCP_TOKEN"
+    }
+  }
+}

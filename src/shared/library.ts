@@ -9,7 +9,15 @@ export interface LibrarySeat { id:number; floorId:number; name:string; available
 export interface SeatSearch { floorId:number; date:string; start:string; end:string; startMode?:'now' }
 export interface SeatSelection extends SeatSearch { seatId:number; title:string; memo:string }
 export interface BookingDraft { id:string; floor:string; seat:string; date:string; start:string; end:string; startMode?:'now'; title:string; memo:string; notice:string; requiresNotice:boolean; captchaMode:'0'|'1'|'2'; expiresAt:string }
-export interface LibraryBookingResult { ok:boolean; uncertain?:boolean; message:string }
+export interface LibraryBookingResult { ok:boolean; uncertain?:boolean; requiresVerification?:boolean; message:string }
+export interface AgentBooking {
+  id:string
+  selection:SeatSelection
+  seat:string
+  phase:'pending'|'submitting'|'completed'|'failed'|'uncertain'|'cancelled'|'expired'|'verification-required'
+  expiresAt:string
+  message:string
+}
 export interface LibraryReservation { id:string; seat:string; begin:string; end:string; status:string }
 export interface LibraryState {
   phase:'idle'|'loading'|'ready'|'error'
@@ -22,6 +30,7 @@ export interface LibraryState {
   seats:LibrarySeat[]
   seatsAt:string|null
   seatIssue:string|null
+  agentBooking?:AgentBooking|null
 }
 export interface LibraryBridge {
   getState():Promise<LibraryState>
@@ -31,6 +40,9 @@ export interface LibraryBridge {
   searchSeats(query:SeatSearch):Promise<void>
   prepareBooking(selection:SeatSelection):Promise<BookingDraft>
   submitBooking(id:string, acceptedNotice:boolean, captcha:string):Promise<LibraryBookingResult>
+  reviewAgentBooking(id:string):Promise<BookingDraft>
+  submitAgentBooking(requestId:string, draftId:string, acceptedNotice:boolean, captcha:string):Promise<LibraryBookingResult>
+  cancelAgentBooking(id:string):Promise<void>
   getCaptcha():Promise<string>
   getReservations():Promise<LibraryReservation[]>
   openSource():Promise<void>

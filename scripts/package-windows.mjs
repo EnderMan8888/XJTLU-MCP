@@ -24,6 +24,11 @@ await rm(join(stage, 'resources/default_app.asar'), { force: true })
 const appDir = join(stage, 'resources/app')
 await mkdir(appDir, { recursive: true })
 await cp(join(root, 'out'), join(appDir, 'out'), { recursive: true })
+for (const file of ['.agents/plugins/marketplace.json', 'plugins/xjtlu-campus/.codex-plugin/plugin.json', 'plugins/xjtlu-campus/.mcp.json']) {
+  const target = join(appDir, 'codex-plugin', file)
+  await mkdir(dirname(target), { recursive: true })
+  await cp(join(root, 'codex-plugin', file), target)
+}
 await writeFile(join(appDir, 'package.json'), JSON.stringify({ name:pkg.name, version:pkg.version, description:pkg.description, type:'module', main:pkg.main }, null, 2)+'\n')
 const copied = new Set()
 async function copyDependency(name, from, target) {

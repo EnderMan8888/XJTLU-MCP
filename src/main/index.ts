@@ -1,8 +1,9 @@
-import { app, BrowserWindow, ipcMain, net, protocol, safeStorage, session } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, net, protocol, safeStorage, session, shell } from 'electron'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { AmsService } from './ams-service'
 import { CredentialStore } from '../infrastructure/credential-store'
+import { EbridgeCache } from '../infrastructure/ebridge-cache'
 import type { CredentialActionResult } from '../shared/credentials'
 import { AccountService } from '../services/account-service'
 import { EbridgeService } from './ebridge-service'
@@ -10,6 +11,12 @@ import { LibraryService } from './library-service'
 import { todayCourses } from '../shared/today-courses'
 import { ebridgeTimetableForDate } from '../shared/ebridge-timetable'
 import { amsRelativeDays } from '../shared/module-attendance'
+import { CampusQueries } from '../mcp/campus-queries'
+import { McpKeyStore } from '../infrastructure/mcp-key-store'
+import { McpService } from './mcp-service'
+import { codexPluginLink, inspectCodexPairing, inspectCodexPlugin, registerCodexMarketplace, saveCodexPairingKey } from './codex-plugin'
+import { LmcService } from './lmc-service'
+import { z } from 'zod'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const smoke = process.argv.includes('--smoke-test')
@@ -26,6 +33,8 @@ else {
   let ams: AmsService
   let ebridge: EbridgeService
   let library: LibraryService
+  let mcp: McpService
+  let lmc: LmcService
   let ebridgeRefreshChecked=false
   let moduleAttendanceKey=''
   const syncTodayAttendance=():void=>{
@@ -76,11 +85,13 @@ else {
       } catch { return new Response(null, { status: 404 }) }
     })
 
-    const store = new CredentialStore(app.getPath('userData'), {
+    const userData = app.getPath('userData')
+    const localCrypto = {
       available: () => safeStorage.isAsyncEncryptionAvailable(),
-      encrypt: (plaintext) => safeStorage.encryptStringAsync(plaintext),
-      decrypt: async (ciphertext) => (await safeStorage.decryptStringAsync(ciphertext)).result
-    })
+      encrypt: (plaintext: string) => safeStorage.encryptStringAsync(plaintext),
+      decrypt: async (ciphertext: Buffer) => (await safeStorage.decryptStringAsync(ciphertext)).result
+    }
+    const store = new CredentialStore(userData, localCrypto)
     const account = new AccountService(store, (status) => { if (main && !main.isDestroyed()) main.webContents.send('account:changed', status) })
     const credentialAction = async (operation: () => Promise<void>): Promise<CredentialActionResult> => {
       try { await operation(); return { ok: true, message: '已完成。', status: await account.status() } }
@@ -92,11 +103,50 @@ else {
       if (main && !main.isDestroyed()) main.webContents.send('ebridge:state', state)
       syncTodayAttendance();reportToday()
       if(process.argv.includes('--check-ebridge-refresh')&&state.phase==='connected'&&!ebridgeRefreshChecked){ebridgeRefreshChecked=true;setTimeout(()=>{void ebridge.refresh().catch(()=>console.error('eBridge refresh check failed.'))},0)}
-    }, account, process.argv.includes('--inspect-ebridge'))
+    }, account, process.argv.includes('--inspect-ebridge'), new EbridgeCache(userData, localCrypto))
     account.subscribe(ebridge)
+    await ebridge.restoreLocalCache()
     library = new LibraryService((state) => { if (main && !main.isDestroyed()) main.webContents.send('library:state',state) },account,process.argv.includes('--inspect-library'))
     account.subscribe(library)
+    lmc = new LmcService(state => { if (main && !main.isDestroyed()) main.webContents.send('lmc:state', state) }, account)
+    account.subscribe(lmc)
+    const queries = new CampusQueries({ ams, ebridge, library, lmc })
+    account.subscribe({
+      cancelAccountAutomation: async () => { queries.cancelPending() },
+      accountChanged: (previous, current) => { if (previous.username && current.username && previous.username !== current.username) queries.invalidate() }
+    })
+    mcp = new McpService(queries, new McpKeyStore(app.getPath('userData'), {
+      available: () => safeStorage.isAsyncEncryptionAvailable(),
+      encrypt: value => safeStorage.encryptStringAsync(value),
+      decrypt: async value => (await safeStorage.decryptStringAsync(value)).result
+    }), app.getVersion(), state => { if (main && !main.isDestroyed()) main.webContents.send('mcp:state', state) })
     const handlers = {
+      'lmc:get-state': () => lmc.getState(),
+      'lmc:connect': () => lmc.connect(),
+      'lmc:refresh': () => lmc.refresh(),
+      'lmc:show-login': () => lmc.showLogin(),
+      'lmc:disconnect': () => lmc.disconnect(),
+      'lmc:load-course': (id: unknown) => lmc.loadCourse(id),
+      'lmc:load-folder': (id: unknown) => lmc.loadFolder(id),
+      'lmc:notifications': (more: unknown) => lmc.loadNotifications(z.boolean().parse(more)),
+      'lmc:download': (id: unknown) => lmc.download(id),
+      'lmc:cancel-download': (id: unknown) => lmc.cancelDownload(id),
+      'lmc:reveal-download': (id: unknown) => lmc.revealDownload(id),
+      'lmc:open-source': (value: unknown) => lmc.openSource(z.union([z.object({ kind: z.literal('home') }).strict(), z.object({ kind: z.enum(['course', 'activity', 'notification']), id: z.string().min(1).max(200) }).strict()]).parse(value)),
+      'mcp:get-status': () => mcp.getStatus(),
+      'mcp:get-codex-plugin-status': async () => {
+        const [plugin, pairing] = await Promise.all([inspectCodexPlugin(app.getAppPath()), mcp.inspectCodexPairing(inspectCodexPairing)])
+        return { ...plugin, pairing }
+      },
+      'mcp:open-codex-plugin': async () => {
+        const link = await codexPluginLink(app.getAppPath())
+        await mcp.pairCodex(saveCodexPairingKey)
+        await registerCodexMarketplace(app.getAppPath())
+        await shell.openExternal(link)
+      },
+      'mcp:copy-config': (value: unknown) => { if (value !== 'json' && value !== 'codex' && value !== 'token') throw new Error('Unsupported configuration'); mcp.copyConfig(value, text => clipboard.writeText(text)) },
+      'mcp:set-enabled': (value: unknown) => { if (typeof value !== 'boolean') throw new Error('Unsupported setting'); return mcp.setEnabled(value) },
+      'mcp:rotate-key': () => mcp.rotateKey(),
       'ams:get-state': () => ams.getState(),
       'ams:open-login': () => ams.openLogin(),
       'ams:refresh': () => ams.refresh(),
@@ -110,8 +160,11 @@ else {
       'ebridge:get-state': () => ebridge.getState(),
       'ebridge:connect': () => ebridge.connect(),
       'ebridge:refresh': () => ebridge.refresh(),
+      'ebridge:local-cache': (value: unknown) => ebridge.setLocalCache(z.boolean().parse(value)),
+      'ebridge:grades': () => ebridge.loadGrades(),
+      'ebridge:grade-source': (value: unknown) => ebridge.openGradeSource(z.enum(['components', 'records']).parse(value)),
       'ebridge:show-login': () => ebridge.showLogin(),
-      'ebridge:open-source': (value: unknown) => { if (value !== 'courses' && value !== 'timetable' && value !== 'exams') throw new Error('Unsupported view'); return ebridge.openSource(value) },
+      'ebridge:open-source': (value: unknown) => { if (value !== 'courses' && value !== 'timetable' && value !== 'exams' && value !== 'grades') throw new Error('Unsupported view'); return ebridge.openSource(value) },
       'ebridge:disconnect': () => ebridge.disconnect(),
       'library:get-state': () => library.getState(),
       'library:refresh': () => library.refresh(),
@@ -120,6 +173,12 @@ else {
       'library:search': (value:unknown) => library.searchSeats(value),
       'library:prepare': (value:unknown) => library.prepareBooking(value),
       'library:submit': (value:unknown) => { if(!value||typeof value!=='object'||!('id'in value)||!('acceptedNotice'in value)||!('captcha'in value))throw new Error('Unsupported booking');return library.submitBooking(value.id,value.acceptedNotice,value.captcha) },
+      'library:agent-review': (id:unknown) => library.agentBookings.review(z.uuid().parse(id)),
+      'library:agent-cancel': (id:unknown) => library.agentBookings.cancel(z.uuid().parse(id)),
+      'library:agent-submit': (value:unknown) => {
+        const {requestId,draftId,acceptedNotice,captcha}=z.object({requestId:z.uuid(),draftId:z.uuid(),acceptedNotice:z.boolean(),captcha:z.string().max(1000)}).strict().parse(value)
+        return library.agentBookings.submit(requestId,draftId,acceptedNotice,captcha)
+      },
       'library:captcha': () => library.getCaptcha(),
       'library:reservations': () => library.getReservations(),
       'library:open-source': () => library.openSource(),
@@ -143,14 +202,16 @@ else {
     else await main.loadURL('app://desktop/index.html')
     main.show()
     main.focus()
+    void mcp.setEnabled(true)
     if (smoke) main.setTitle('XJTLU-MCP · UI 测试')
-    if (!smoke) void ams.openLogin().catch(() => console.error('AMS initial connection failed.'))
-    if (!smoke) void ebridge.connect().catch(() => console.error('eBridge initial connection failed.'))
+    if (!smoke && !process.argv.includes('--inspect-lmc')) void ams.openLogin().catch(() => console.error('AMS initial connection failed.'))
+    if (!smoke && !process.argv.includes('--inspect-lmc')) void ebridge.connect().catch(() => console.error('eBridge initial connection failed.'))
+    if (!smoke && process.argv.includes('--connect-lmc')) void lmc.connect().catch(() => console.error('LMC connection failed.'))
     if (!smoke && process.argv.includes('--read-library')) void library.refresh().catch(() => console.error('Library query failed.'))
     if (!smoke && process.argv.includes('--connect-library')) void library.connect().catch(() => console.error('Library connection failed.'))
   }).catch(() => { console.error('The desktop application could not start.'); app.quit() })
 
   app.on('second-instance', () => { if (main && !main.isDestroyed()) { main.show(); main.focus() } })
   app.on('window-all-closed', () => app.quit())
-  app.on('before-quit', () => { ams?.dispose(); ebridge?.dispose(); library?.dispose() })
+  app.on('before-quit', () => { void mcp?.dispose(); lmc?.dispose(); ams?.dispose(); ebridge?.dispose(); library?.dispose() })
 }

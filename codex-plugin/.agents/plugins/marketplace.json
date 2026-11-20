@@ -1,0 +1,20 @@
+{
+  "name": "xjtlu-local",
+  "interface": {
+    "displayName": "XJTLU 本机插件"
+  },
+  "plugins": [
+    {
+      "name": "xjtlu-campus",
+      "source": {
+        "source": "local",
+        "path": "./plugins/xjtlu-campus"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

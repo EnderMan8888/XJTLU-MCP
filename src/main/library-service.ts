@@ -6,6 +6,7 @@ import type {CredentialStatus} from '../shared/credentials'
 import {initialLibraryState,LIBRARY_API,type BookingDraft,type LibraryBookingResult,type LibraryFloor,type LibraryReservation,type LibraryState,type SeatSearch,type SeatSelection} from '../shared/library'
 import {beijingToday,envelopeData,encryptedSeatPayload,LibraryError,libraryRequest,parseLibraryFloors,parseLibraryReservations,parseLibrarySeats,reservationQuery,resolveSeatTime,seatSearchSchema,seatSelectionSchema,validateSeatTime,type RawLibrarySeat} from '../providers/library'
 import {LibraryLogin,type LibraryAuth} from './library-login'
+import {AgentBookings} from './agent-bookings'
 
 interface Rules {notice:string;requiresNotice:boolean;captchaMode:'0'|'1'|'2';memoMax:number;memoRequired:boolean;titleRequired:boolean}
 function plainText(html:string):string {
@@ -23,6 +24,7 @@ export class LibraryService implements AccountConsumer {
   private disposed=false
   private diagnosed=false
   private draft:{public:BookingDraft;selection:SeatSelection;rules:Rules;generation:number}|null=null
+  readonly agentBookings = new AgentBookings(this, agentBooking => this.update({agentBooking}))
   constructor(private publish:(state:LibraryState)=>void,account:AccountService,private diagnostic=false){
     this.login=new LibraryLogin(account,(phase,message)=>{this.update({booking:{phase,message}});if(phase==='connected'&&process.argv.includes('--diagnose-library')&&!this.diagnosed){this.diagnosed=true;void this.diagnose().catch(()=>console.error('Library diagnosis could not complete.'))}})
   }
@@ -69,18 +71,25 @@ export class LibraryService implements AccountConsumer {
     await this.searchSeats({floorId:floor.id,date:beijingToday(),start:'00:00',end:'22:00',startMode:'now'})
   }
   async searchSeats(input:unknown):Promise<void>{
-    const query=resolveSeatTime(seatSearchSchema.parse(input));validateSeatTime(query)
-    this.floor(query.floorId)
-    const auth=this.auth(),g=this.generation
+    const g=this.generation
     this.update({seatIssue:null})
     try{
-      const data=await this.seats(query,auth)
+      const data=await this.readSeats(input)
       if(g!==this.generation||this.disposed)return
       this.draft=null
-      this.update({search:query,seats:data.seats,seatsAt:new Date().toISOString(),seatIssue:null})
+      this.update({search:data.query,seats:data.seats,seatsAt:data.fetchedAt,seatIssue:null})
       if(this.diagnostic)console.log('LIBRARY_SEATS',JSON.stringify({seats:data.seats.length,available:data.seats.filter(s=>s.available).length}))
     }catch(error){if(g===this.generation)this.update({seatIssue:error instanceof Error?error.message:'座位查询失败，请重新查询。'});throw error}
   }
+  async readSeats(input:unknown) {
+    const query=resolveSeatTime(seatSearchSchema.parse(input));validateSeatTime(query)
+    this.floor(query.floorId)
+    const auth=this.auth(),g=this.generation
+    const data=await this.seats(query,auth)
+    if(g!==this.generation||this.disposed)throw new LibraryError('auth','学校账号已变化，请重新查询座位。')
+    return {query,seats:data.seats,fetchedAt:new Date().toISOString()}
+  }
+  discardBooking(id:string):void {if(this.draft?.public.id===id)this.draft=null}
   private async rules(floorId:number,token:string):Promise<Rules>{
     const fields=z.array(z.object({sysKey:z.string(),sysValue:z.union([z.string(),z.number(),z.null()])})).parse(envelopeData(await this.request('sysConfig/public',token)))
     const config=Object.fromEntries(fields.map(f=>[f.sysKey,String(f.sysValue??'')]))
@@ -115,7 +124,7 @@ export class LibraryService implements AccountConsumer {
     if(draft.rules.requiresNotice&&acceptedNotice!==true)return Promise.resolve({ok:false,message:'请先阅读并确认学校预约须知。'})
     if(typeof captcha!=='string'||captcha.length>1000)return Promise.resolve({ok:false,message:'请输入有效的验证码。'})
     if(draft.rules.captchaMode==='1'&&!captcha.trim())return Promise.resolve({ok:false,message:'请输入学校图片验证码。'})
-    if(draft.rules.captchaMode==='2')return this.openSource().then(()=>({ok:false,message:'学校当前要求滑块验证，请在打开的官方窗口完成本次预约。'}))
+    if(draft.rules.captchaMode==='2')return this.openSource().then(()=>({ok:false,requiresVerification:true,message:'学校当前要求滑块验证，请在打开的官方窗口完成本次预约。'}))
     this.draft=null
     const task=(async():Promise<LibraryBookingResult>=>{
       try{
@@ -142,21 +151,22 @@ export class LibraryService implements AccountConsumer {
     const bytes=Buffer.from(await response.arrayBuffer());if(bytes.length>500_000)throw new LibraryError('schema','验证码图片过大。')
     return `data:${type.split(';')[0]};base64,${bytes.toString('base64')}`
   }
-  async getReservations():Promise<LibraryReservation[]>{
-    const auth=this.auth(),date=beijingToday(),records:LibraryReservation[]=[]
+  async getReservations(date=beijingToday()):Promise<LibraryReservation[]>{
+    const auth=this.auth(),g=this.generation,records:LibraryReservation[]=[]
     let read=0
     for(let page=1;page<=10;page++){
       const result=parseLibraryReservations(await this.request('reserve/resvInfo?'+reservationQuery(date,page),auth.token))
+      if(g!==this.generation||this.disposed)throw new LibraryError('auth','学校账号已变化，请重新查询预约。')
       read+=result.rawCount;records.push(...result.records)
       if(result.count!==null?read>=result.count:result.rawCount<100)return records
       if(!result.rawCount)throw new LibraryError('schema','预约记录分页不完整，请在学校原页核对。')
     }
     throw new LibraryError('schema','当天预约记录过多，请在学校原页查看。')
   }
-  async cancelAccountAutomation():Promise<void>{this.generation++;this.draft=null;await this.login.cancel();await this.submission?.catch(()=>{})}
+  async cancelAccountAutomation():Promise<void>{this.generation++;this.agentBookings.reset();this.draft=null;await this.login.cancel();await this.submission?.catch(()=>{})}
   accountChanged(previous:CredentialStatus,current:CredentialStatus):void{
     if(previous.username&&current.username&&previous.username!==current.username){this.update({search:null,seats:[],seatsAt:null,seatIssue:null});void this.login.reset().catch(()=>this.update({booking:{phase:'error',message:'请重新连接学校账号。'}}))}
     else if(current.saved&&this.state.booking.phase==='credentials-required')void this.connect().catch(()=>{})
   }
-  dispose():void{this.disposed=true;this.generation++;this.draft=null;this.login.dispose()}
+  dispose():void{this.disposed=true;this.generation++;this.agentBookings.reset();this.draft=null;this.login.dispose()}
 }
