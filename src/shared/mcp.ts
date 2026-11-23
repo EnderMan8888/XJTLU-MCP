@@ -1,16 +1,26 @@
 export interface McpStatus { phase: 'starting' | 'ready' | 'stopped' | 'error'; url: string | null; message: string; tools: string[] }
 export type CodexPairingStatus = 'paired' | 'unpaired' | 'outdated' | 'stored' | 'unknown'
-export interface CodexPluginStatus {
-  installation: 'enabled' | 'disabled' | 'not-installed' | 'unknown'
-  marketplace: 'registered' | 'unregistered' | 'unknown'
-  pairing: CodexPairingStatus
-  version: string | null
+export type McpConfigFormat = 'json' | 'codex' | 'deepseek' | 'mimocode' | 'workbuddy' | 'kimi' | 'token' | 'url' | 'bearer'
+export type WorkbuddyConfigStatus = 'written' | 'missing' | 'invalid' | 'unknown'
+export type WorkbuddyTrustStatus = 'approved' | 'pending' | 'unknown'
+export interface WorkbuddyInstallStatus { config: WorkbuddyConfigStatus; pairing: CodexPairingStatus; trust: WorkbuddyTrustStatus }
+export const AGENT_CLIENTS = ['codex', 'deepseek', 'workbuddy', 'mimo', 'kimi'] as const
+export type AgentClient = typeof AGENT_CLIENTS[number]
+export interface AgentInstallStatus {
+  installation: 'installed' | 'disabled' | 'partial' | 'not-installed' | 'unknown'
+  pairing?: CodexPairingStatus
+  version?: string
+  detail?: string
+  locations: { label: string; path: string }[]
+  removable: boolean
 }
-export type McpConfigFormat = 'json' | 'codex' | 'token'
 export interface McpBridge {
   getStatus(): Promise<McpStatus>
-  getCodexPluginStatus(): Promise<CodexPluginStatus>
   openCodexPlugin(): Promise<void>
+  getAgentInstallStatus(client: AgentClient): Promise<AgentInstallStatus>
+  installAgent(client: AgentClient): Promise<void>
+  uninstallAgent(client: AgentClient): Promise<void>
+  openDoubaoSetup(): Promise<void>
   copyConfig(format: McpConfigFormat): Promise<void>
   setEnabled(enabled: boolean): Promise<void>
   rotateKey(): Promise<void>

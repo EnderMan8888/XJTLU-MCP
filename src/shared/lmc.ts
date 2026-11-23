@@ -2,7 +2,8 @@ import type { ConnectionPhase } from './ams'
 
 export const LMC_ORIGIN = 'https://core.xjtlu.edu.cn'
 export interface LmcCourse { id: string; title: string; shortName: string }
-export interface LmcActivity { id: string; title: string; section: string; type: string; fileType: string; downloadable: boolean }
+export interface LmcAssignmentDates { opens: string | null; due: string | null }
+export interface LmcActivity { id: string; title: string; section: string; type: string; fileType: string; downloadable: boolean; assignmentDates?: LmcAssignmentDates }
 export interface LmcFile { id: string; name: string; path: string; extension: string }
 export interface LmcFolder { files: LmcFile[]; fetchedAt: string | null; loading: boolean; issue: string | null }
 export interface LmcModule { courseId: string; activities: LmcActivity[]; folders: Record<string, LmcFolder>; fetchedAt: string | null; loading: boolean; issue: string | null }

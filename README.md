@@ -1,6 +1,6 @@
 # XJTLU-MCP · 校园信息中心
 
-TypeScript + Electron 桌面应用，聚合 AMS 出勤、eBridge 教务、图书馆选座预约和 Learning Mall Core。V2.0 提供 16 个 MCP 工具，覆盖连接与刷新、课表、考试、成绩、考勤、图书馆座位与预约、LMC 通知和课程资料。
+TypeScript + Electron 桌面应用，聚合 AMS 出勤、eBridge 教务、图书馆选座预约和 Learning Mall Core。V2.1 提供 16 个 MCP 工具，覆盖连接与刷新、课表、考试、成绩、考勤、图书馆座位与预约、LMC 通知和课程资料。
 
 ## Learning Mall Core
 
@@ -12,15 +12,17 @@ Notification 展示标题、正文、时间和学校的已读状态，支持分�
 
 侧栏新增「Agent 连接」，可复制 Codex 或通用客户端配置。程序运行时提供带独立访问密钥的本机 Streamable HTTP 服务，地址为 `http://127.0.0.1:39527/mcp`。
 
+最小化窗口时，MCP 继续运行。Windows 上点窗口右上角 × 会收起到系统托盘，点击托盘图标可恢复窗口。需要完全退出时，右键托盘图标选择「退出 XJTLU-MCP」。
+
 单节考勤支持北京时间今天、昨天和明天。工具复用当前桌面连接并标明数据来源、更新时间和完整性。通过 Agent 发起的座位预约需在桌面确认，LMC 文件由用户选择保存位置。
 
-本机 Codex 也可以通过 [XJTLU 校园助手插件](codex-plugin/README.md) 连接。使用 `npm run package:codex-plugin` 生成 Windows 本机插件 ZIP。连接参数和结果语义见 [MCP 连接说明](docs/mcp.md)。
+本机 Codex 也可以通过 [XJTLU-MCP 插件](codex-plugin/README.md) 连接。使用 `npm run package:codex-plugin` 生成 Windows 本机插件 ZIP。连接参数和结果语义见 [MCP 连接说明](docs/mcp.md)。
 
 ## 下载使用
 
 在 [Releases](https://github.com/EnderMan8888/XJTLU-MCP/releases) 下载 Windows x64 压缩包，完整解压后双击 `XJTLU-MCP.exe`。无需安装 Node.js 或 Electron，请保留同目录的运行文件。发布包附带 SHA256 校验文件，本版本未进行代码签名。
 
-升级时先退出 XJTLU-MCP，将新版完整解压到新目录，双击其中的 `XJTLU-MCP.exe`。确认正常后，可以把新版文件夹放回原来的完整路径，以保留旧桌面快捷方式及指向该路径的 Codex 插件目录设置。学校账号、会话和已启用的教务缓存保存在同一 Windows 用户的 `%APPDATA%\XJTLU-MCP-AMS`。若学校会话已经过期，按提示完成登录验证即可。详情见 [V2.0 升级说明](releases/v2.0.0.md)。
+升级时先退出 XJTLU-MCP，将新版完整解压到新目录，双击其中的 `XJTLU-MCP.exe`。确认正常后，可以把新版文件夹放回原来的完整路径，以保留旧桌面快捷方式。学校账号、会话和已启用的教务缓存保存在同一 Windows 用户的 `%APPDATA%\XJTLU-MCP-AMS`。若学校会话已经过期，按提示完成登录验证即可。详情见 [V2.1 升级说明](releases/v2.1.0.md)。
 
 首页「账号与登录」和「AMS 出勤」是同级入口，侧栏也可直接进入。学校账号归公共账号模块管理，服务按需使用；断开 AMS 会保留公共账号。
 
@@ -115,7 +117,7 @@ AMS「近期课表」的签到状态同样按 Module → 对应课程 → Detail
 - `tests`：解析与业务规则检查；`docs`：设计与早期开发记录。
 - `releases`：版本说明；`.github/workflows/release.yml`：Windows 打包及 GitHub Release 发布。
 
-Windows x64 本地执行 `npm run package:win`，复用已经安装的 Electron 运行时，生成 `dist/XJTLU-MCP-2.0.0-win-x64.zip` 和 `dist/SHA256SUMS.txt`。打包仅复制构建产物、生产依赖及运行时，不包含任何用户资料；已有同名输出时拒绝覆盖。
+Windows x64 本地执行 `npm run package:win`，复用已经安装的 Electron 运行时，生成 `dist/XJTLU-MCP-2.1.0-win-x64.zip` 和 `dist/SHA256SUMS.txt`。打包仅复制构建产物、生产依赖及运行时。已有同名输出时拒绝覆盖。
 
 推送新的 `releases/` 版本说明到 `main` 会自动构建并发布相应版本，Release 标签指向该次源码提交。账号、学校 Cookie、调试目录、依赖、构建产物和导入的旧版工具不进入源码仓库。
 

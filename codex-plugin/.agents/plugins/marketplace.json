@@ -1,7 +1,7 @@
 {
   "name": "xjtlu-local",
   "interface": {
-    "displayName": "XJTLU 本机插件"
+    "displayName": "XJTLU-MCP"
   },
   "plugins": [
     {

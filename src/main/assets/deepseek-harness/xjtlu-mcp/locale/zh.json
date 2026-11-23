@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "XJTLU-MCP",
+    "description": "在 DeepSeek Harness 中通过 Streamable HTTP 接入 xjtlu 校园助手。xjtlu 服务暴露 16 项只读校园工具（课表、考试、成绩、考勤、图书馆座位和 LMC 文件等），来自本机 XJTLU-MCP 工作台的 http://127.0.0.1:39527/mcp。Authorization 通过凭据引用 XJTLU_MCP_TOKEN 解析；保持工作台运行并设置该凭据后，工具将以 mcp__xjtlu__* 形式出现。"
+  }
+}

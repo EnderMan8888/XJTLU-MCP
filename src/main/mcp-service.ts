@@ -1,7 +1,8 @@
 import type { McpKeyStore } from '../infrastructure/mcp-key-store.ts'
-import type { CodexPairingStatus, McpConfigFormat, McpStatus } from '../shared/mcp.ts'
+import type { McpConfigFormat, McpStatus } from '../shared/mcp.ts'
 import type { CampusQueries } from '../mcp/campus-queries.ts'
 import { MCP_PORT, MCP_TOOL_NAMES, startCampusMcp } from '../mcp/server.ts'
+import { kimiConfigEntry } from './kimi-code.ts'
 
 export class McpService {
   private state: McpStatus = { phase: 'stopped', url: null, message: 'Agent 连接尚未开启。', tools: [...MCP_TOOL_NAMES] }
@@ -17,7 +18,7 @@ export class McpService {
   constructor(queries: CampusQueries, keys: Pick<McpKeyStore, 'readOrCreate' | 'rotate'>, version: string, publish: (state: McpStatus) => void, port = MCP_PORT) { this.queries = queries; this.keys = keys; this.version = version; this.publish = publish; this.port = port }
   getStatus(): McpStatus { return structuredClone(this.state) }
   private update(next: Partial<McpStatus>): void { this.state = { ...this.state, ...next }; this.publish(this.getStatus()) }
-  private enqueue(operation: () => Promise<void>): Promise<void> { const result = this.tail.then(operation); this.tail = result.catch(() => {}); return result }
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> { const result = this.tail.then(operation); this.tail = result.then(() => {}, () => {}); return result }
   private async stop(): Promise<void> { const listener = this.listener; this.listener = null; this.token = ''; if (listener) await listener.close() }
   private async start(rotate = false): Promise<void> {
     if (this.disposed) return
@@ -38,20 +39,42 @@ export class McpService {
     })
   }
   rotateKey(): Promise<void> { return this.enqueue(async () => { if (!this.disposed) { await this.stop(); await this.start(true) } }) }
-  pairCodex(saveKey: (token: string) => Promise<void>): Promise<void> {
+  pairClient<T>(install: (token: string, url: string) => Promise<T>): Promise<T> {
     return this.enqueue(async () => {
       if (!this.listener || !this.token || this.disposed) throw new Error('请先开启 Agent 连接。')
-      await saveKey(this.token)
+      return install(this.token, this.listener.url)
     })
   }
-  inspectCodexPairing(inspectKey: (token: string) => Promise<CodexPairingStatus>): Promise<CodexPairingStatus> {
-    return this.tail.then(() => inspectKey(this.token))
+  inspectClient<T>(inspect: (token: string) => Promise<T>): Promise<T> {
+    return this.tail.then(() => inspect(this.token))
   }
+  uninstallClient(uninstall: () => Promise<void>): Promise<void> { return this.enqueue(uninstall) }
   copyConfig(format: McpConfigFormat, write: (value: string) => void): void {
     if (!this.listener || !this.token || this.disposed) throw new Error('请先开启 Agent 连接。')
     if (format === 'token') write(this.token)
+    else if (format === 'url') write(this.listener.url)
+    else if (format === 'bearer') write(`Bearer ${this.token}`)
     else if (format === 'codex') write(`[mcp_servers.xjtlu]\nurl = "${this.listener.url}"\nhttp_headers = { Authorization = "Bearer ${this.token}" }\n`)
     else if (format === 'json') write(JSON.stringify({ mcpServers: { xjtlu: { type: 'http', url: this.listener.url, headers: { Authorization: `Bearer ${this.token}` } } } }, null, 2))
+    else if (format === 'deepseek') {
+      write(JSON.stringify({
+        xjtlu: {
+          transport: 'streamable-http',
+          url: this.listener.url,
+          headers: { Authorization: 'Bearer ${credential:XJTLU_MCP_TOKEN}' },
+          enabled: true
+        }
+      }, null, 2))
+    }
+    else if (format === 'mimocode') write(JSON.stringify({ mcp: { xjtlu: { type: 'remote', url: this.listener.url, oauth: false, enabled: true, headers: { Authorization: `Bearer ${this.token}` } } } }, null, 2))
+    else if (format === 'workbuddy') write(JSON.stringify({ mcpServers: { xjtlu: { type: 'streamableHttp', url: this.listener.url, headers: { Authorization: `Bearer ${this.token}` }, timeout: 30000 } } }, null, 2))
+    else if (format === 'kimi') {
+      write(JSON.stringify({
+        mcpServers: {
+          xjtlu: kimiConfigEntry(this.listener.url)
+        }
+      }, null, 2))
+    }
     else throw new Error('不支持的配置格式。')
   }
   dispose(): Promise<void> { this.disposed = true; return this.enqueue(() => this.stop()) }

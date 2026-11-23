@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "xjtlu": {
+      "type": "streamableHttp",
+      "url": "http://127.0.0.1:39527/mcp",
+      "headers": {
+        "Authorization": "Bearer <从「Agent 连接」页复制的访问密钥>"
+      },
+      "timeout": 30000
+    }
+  }
+}

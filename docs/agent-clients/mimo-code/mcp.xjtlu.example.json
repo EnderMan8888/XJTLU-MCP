@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "xjtlu": {
+      "type": "remote",
+      "url": "http://127.0.0.1:39527/mcp",
+      "oauth": false,
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer {env:XJTLU_MCP_TOKEN}"
+      }
+    }
+  }
+}

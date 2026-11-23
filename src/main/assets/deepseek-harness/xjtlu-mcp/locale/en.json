@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "XJTLU-MCP",
+    "description": "Adds the xjtlu campus assistant to DeepSeek Harness over Streamable HTTP. The xjtlu server exposes 16 read-only campus tools (timetable, exams, grades, attendance, library seats, and LMC files) from the local XJTLU-MCP workbench at http://127.0.0.1:39527/mcp. Authorization resolves from the XJTLU_MCP_TOKEN credential reference; keep the workbench running and the token set for tools to appear as mcp__xjtlu__*."
+  }
+}

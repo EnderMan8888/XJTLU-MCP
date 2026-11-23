@@ -1,0 +1,4 @@
+- insert:
+    - id: xjtlu-campus-mcp
+      name: '@local/xjtlu-mcp'
+      inject: [mcpManager]

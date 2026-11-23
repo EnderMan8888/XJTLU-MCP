@@ -1,7 +1,7 @@
 import { it } from 'node:test'
 import assert from 'node:assert/strict'
 import { runInNewContext } from 'node:vm'
-import { lmcAcademicUrl, lmcAjaxScript, lmcCourseInspection, lmcDownloadAllowed, lmcFileInspection, lmcFileUrl, lmcResourceUrl, lmcSchoolUrl, lmcText, parseLmcCourses, parseLmcNotifications, safeLmcFilename } from '../src/providers/lmc.ts'
+import { cleanLmcAssignmentDates, lmcAcademicUrl, lmcAjaxScript, lmcAssignmentCardsScript, lmcAssignmentPageInspection, lmcCourseInspection, lmcDownloadAllowed, lmcFileInspection, lmcFileUrl, lmcResourceUrl, lmcSchoolUrl, lmcText, parseLmcCourses, parseLmcNotifications, safeLmcFilename } from '../src/providers/lmc.ts'
 import { LMC_ORIGIN } from '../src/shared/lmc.ts'
 
 const file = `${LMC_ORIGIN}/pluginfile.php/42/mod_resource/content/1/example.pdf`
@@ -110,4 +110,55 @@ it('LMC includes weekly files outside the tiles main region and waits for the co
   const result = runInNewContext(lmcCourseInspection, { document, location: { origin: LMC_ORIGIN }, URL })
   assert.equal(result.indexReady, true)
   assert.deepEqual(Array.from(result.activities, (row: any) => [row.cmid, row.section, row.fileType]), [['1', 'Weekly notes', 'pdf'], ['2', 'Weekly notes', '']])
+})
+
+it('LMC uses only assignment opening and due labels in the rendered activity card', () => {
+  const row = (label: string, value: string) => ({ textContent: `${label} ${value}`, querySelector: () => ({ textContent: label }) })
+  const dates = { children: [row('Opened:', 'Monday, 2 November 2026, 9:00 AM'), row('截止日期：', '16 November 2026, 11:55 PM'), row('Cut-off date:', '17 November 2026, 11:55 PM')] }
+  const activity = { querySelector: () => null, querySelectorAll: () => [dates], closest: () => null }
+  const link = (type: string, id: number, hasCard: boolean) => ({
+    href: `${LMC_ORIGIN}/mod/${type}/view.php?id=${id}`,
+    textContent: `Activity ${id}`,
+    cloneNode: () => ({ textContent: `Activity ${id}`, querySelectorAll: () => [] }),
+    querySelector: () => null,
+    closest: (selector: string) => selector === '.activity' && hasCard ? activity : null
+  })
+  const root = { querySelectorAll: () => [link('assign', 1, true), link('quiz', 2, true)] }
+  const document = {
+    body: { id: 'page-course-view-tiles' },
+    querySelectorAll: () => [link('assign', 1, false), link('quiz', 2, false), link('assign', 3, false)],
+    querySelector: (selector: string) => selector === '#region-main' ? root : null
+  }
+  const result = runInNewContext(lmcCourseInspection, { document, location: { origin: LMC_ORIGIN }, URL })
+  assert.deepEqual(cleanLmcAssignmentDates(result.activities[0].assignmentDates), {
+    opens: 'Monday, 2 November 2026, 9:00 AM', due: '16 November 2026, 11:55 PM'
+  })
+  assert.equal(result.activities[1].assignmentDates, undefined)
+  assert.equal(result.activities[2].assignmentDates, undefined)
+})
+
+it('LMC reads a tile assignment card without navigating to an assignment', async () => {
+  const row = { textContent: 'Due: 16 November 2026, 11:55 PM', querySelector: () => ({ textContent: 'Due:' }) }
+  const card = { querySelectorAll: () => [{ children: [row] }] }
+  const template = { innerHTML: '', content: { querySelector: (selector: string) => selector === '#module-30.modtype_assign' ? card : null } }
+  const response = await runInNewContext(lmcAssignmentCardsScript(['30', '31']), {
+    document: { createElement: () => template }, location: { origin: LMC_ORIGIN }, URL, AbortSignal, M: { cfg: { sesskey: 'test' } },
+    fetch: async (url: URL, options: RequestInit) => {
+      assert.equal(url.pathname, '/lib/ajax/service.php')
+      assert.equal(options.redirect, 'error')
+      assert.deepEqual(JSON.parse(String(options.body)), [
+        { index: 0, methodname: 'core_course_get_module', args: { id: 30 } },
+        { index: 1, methodname: 'core_course_get_module', args: { id: 31 } }
+      ])
+      return { ok: true, text: async () => JSON.stringify([{ error: false, data: '<li id="module-30"></li>' }, { error: true }]) }
+    }
+  })
+  assert.equal(response.length, 1)
+  assert.equal(response[0][0], '30')
+  assert.deepEqual(cleanLmcAssignmentDates(response[0][1]), { opens: null, due: '16 November 2026, 11:55 PM' })
+
+  const opened = runInNewContext(lmcAssignmentPageInspection, {
+    document: { body: { id: 'page-mod-assign-view' }, querySelector: () => card }, location: { origin: LMC_ORIGIN }
+  })
+  assert.deepEqual(cleanLmcAssignmentDates(opened), { opens: null, due: '16 November 2026, 11:55 PM' })
 })

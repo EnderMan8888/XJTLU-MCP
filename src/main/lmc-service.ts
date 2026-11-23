@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { z } from 'zod'
 import type { AccountConsumer, AccountService } from '../services/account-service'
 import type { CredentialStatus } from '../shared/credentials'
-import { initialLmcState, LMC_ORIGIN, type LmcDownload, type LmcFile, type LmcModule, type LmcNotification, type LmcNotificationRange, type LmcSource, type LmcState } from '../shared/lmc'
-import { lmcAcademicUrl, lmcAjaxScript, lmcCourseInspection, lmcDownloadAllowed, lmcFileInspection, lmcFileUrl, lmcId, lmcSchoolUrl, lmcText, parseLmcCourses, parseLmcNotifications, safeLmcFilename, type LmcFilesDocument, type LmcPageDocument } from '../providers/lmc'
+import { initialLmcState, LMC_ORIGIN, type LmcAssignmentDates, type LmcDownload, type LmcFile, type LmcModule, type LmcNotification, type LmcNotificationRange, type LmcSource, type LmcState } from '../shared/lmc'
+import { cleanLmcAssignmentDates, lmcAcademicUrl, lmcAjaxScript, lmcAssignmentCardsScript, lmcAssignmentPageInspection, lmcCourseInspection, lmcDownloadAllowed, lmcFileInspection, lmcFileUrl, lmcId, lmcSchoolUrl, lmcText, parseLmcCourses, parseLmcNotifications, safeLmcFilename, type LmcFilesDocument, type LmcPageDocument } from '../providers/lmc'
 import { buildAutomaticLoginScript, buildLoginInspectionScript, isAuthenticationOrigin, isCredentialPage, SCHOOL_VERIFICATION_MESSAGE } from '../security/login-policy'
 import { isAbortedNavigation, showSchoolLoginWindow } from './school-login-window'
 
@@ -207,10 +207,18 @@ export class LmcService implements AccountConsumer {
         if (!this.valid(g, win)) return
         if (document?.auth) throw new LmcAuthError()
         if (!document?.recognized || !document.indexReady || !Array.isArray(document.activities)) throw new Error('Unrecognized course or index not ready')
-        const activities = document.activities.filter(row => lmcId.safeParse(row.cmid).success && /^[a-z][a-z0-9_]{0,40}$/.test(row.type)).map(row => {
+        const rows = document.activities.filter(row => lmcId.safeParse(row.cmid).success && /^[a-z][a-z0-9_]{0,40}$/.test(row.type))
+        const indexAssignments = rows.filter(row => row.type === 'assign' && !row.assignmentDates).map(row => row.cmid)
+        const cards: [string, LmcAssignmentDates][] = indexAssignments.length
+          ? await win.webContents.executeJavaScript(lmcAssignmentCardsScript(indexAssignments)).catch(() => [])
+          : []
+        if (!this.valid(g, win)) return
+        const datesById = new Map(cards)
+        const activities = rows.map(row => {
           const activityId = `activity:${id}:${row.type}:${row.cmid}`
           this.routes.set(activityId, { url: `${LMC_ORIGIN}/mod/${row.type}/view.php?id=${row.cmid}`, courseId: id, kind: row.type === 'resource' ? 'resource' : row.type === 'folder' ? 'folder' : 'activity', name: lmcText(row.title, 1000) })
-          return { id: activityId, title: lmcText(row.title, 1000), section: lmcText(row.section, 300), type: row.type, fileType: lmcText(row.fileType, 30), downloadable: row.type === 'resource' }
+          const assignmentDates = row.type === 'assign' ? cleanLmcAssignmentDates(row.assignmentDates ?? datesById.get(row.cmid)) : undefined
+          return { id: activityId, title: lmcText(row.title, 1000), section: lmcText(row.section, 300), type: row.type, fileType: lmcText(row.fileType, 30), downloadable: row.type === 'resource', ...(assignmentDates && { assignmentDates }) }
         })
         this.moduleState(id, { activities, folders: {}, fetchedAt: new Date().toISOString(), loading: false, issue: null })
       } catch (error) { if (this.valid(g, win)) this.moduleState(id, { loading: false, issue: '课程资料暂未读取成功，保留上次结果。' }); throw error }
@@ -386,10 +394,31 @@ export class LmcService implements AccountConsumer {
   openSource(source: LmcSource): Promise<void> {
     this.requireWindow()
     let url = `${LMC_ORIGIN}/my/`
+    let assignment: { id: string; courseId: string } | undefined
     if (source.kind === 'course') { const id = lmcId.parse(source.id); if (!this.state.courses.some(course => course.id === id)) throw new Error('Invalid course'); url = `${LMC_ORIGIN}/course/view.php?id=${id}` }
-    else if (source.kind === 'activity') url = this.route(source.id).route.url
+    else if (source.kind === 'activity') {
+      const { id, route } = this.route(source.id)
+      url = route.url
+      if (url.startsWith(`${LMC_ORIGIN}/mod/assign/view.php?id=`)) assignment = { id, courseId: route.courseId }
+    }
     else if (source.kind === 'notification') { const target = this.notificationRoutes.get(source.id); if (!target) throw new Error('这条通知未提供可打开的原文入口。'); url = target }
-    return this.queued('open-source', async (g, win) => { await this.navigate(g, win, url); if (this.valid(g, win)) { win.show(); win.focus() } })
+    return this.queued('open-source', async (g, win) => {
+      await this.navigate(g, win, url)
+      if (!this.valid(g, win)) return
+      win.show(); win.focus()
+      if (!assignment || win.webContents.getURL() !== url) return
+      const result = await win.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: lmcAssignmentPageInspection }]).catch(() => null)
+      if (!this.valid(g, win) || win.webContents.getURL() !== url) return
+      const dates = cleanLmcAssignmentDates(result)
+      const { id, courseId } = assignment
+      const module = this.state.modules[courseId]
+      if (!dates || !module) return
+      const activities = module.activities.map(activity => activity.id === id ? {
+        ...activity,
+        assignmentDates: { opens: dates.opens ?? activity.assignmentDates?.opens ?? null, due: dates.due ?? activity.assignmentDates?.due ?? null }
+      } : activity)
+      this.moduleState(courseId, { activities })
+    })
   }
   async cancelAccountAutomation(): Promise<void> {
     this.credentialGeneration++

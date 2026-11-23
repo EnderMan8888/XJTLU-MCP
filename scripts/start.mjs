@@ -21,5 +21,13 @@ const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 const child = spawn(executable, [root, ...process.argv.slice(2)], { stdio: 'inherit', windowsHide: false, env })
 child.on('error', () => { console.error('无法启动 Electron，请确认运行时安装完整。'); process.exitCode = 1 })
-child.on('exit', (code) => { process.exitCode = code ?? 1 })
+child.on('exit', (code) => {
+  if (process.platform === 'win32' && code !== null && (code >>> 0) >= 0x80000000) {
+    const windowsCode = (code >>> 0).toString(16).toUpperCase()
+    console.error(`Electron 异常退出（Windows 错误码 0x${windowsCode}）。`)
+    process.exitCode = 1
+    return
+  }
+  process.exitCode = code ?? 1
+})
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal))

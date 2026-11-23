@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { isAuthenticationOrigin } from '../security/login-policy.ts'
-import { LMC_ORIGIN, type LmcCourse, type LmcNotification } from '../shared/lmc.ts'
+import { LMC_ORIGIN, type LmcAssignmentDates, type LmcCourse, type LmcNotification } from '../shared/lmc.ts'
 
 export const lmcId = z.string().regex(/^[1-9]\d{0,11}$/)
 export function lmcSchoolUrl(raw: string): boolean { try { const u = new URL(raw); return isAuthenticationOrigin(raw) || (u.origin === LMC_ORIGIN && !u.username && !u.password) } catch { return false } }
@@ -57,9 +57,28 @@ export function lmcAjaxScript(kind: 'courses' | 'notifications', offset = 0): st
   })()`
 }
 
-export interface LmcPageDocument { recognized: boolean; auth: boolean; indexReady: boolean; title: string; activities: { cmid: string; title: string; section: string; type: string; fileType: string }[] }
+// Moodle renders these labels with the student's display settings. Keep the date text as shown.
+const readAssignmentDates = String.raw`(root => {
+  const dates = { opens: null, due: null };
+  for (const region of root.querySelectorAll('[data-region="activity-dates"], .activity-dates')) {
+    for (const row of region.children) {
+      const label = row.querySelector('.date-item-label, strong, b');
+      const labelText = label?.textContent.trim() || '';
+      const key = labelText.replace(/\s*[:：]$/, '').replace(/\s+/g, ' ').toLowerCase();
+      const value = row.textContent.trim().slice(labelText.length).trim().replace(/\s+/g, ' ');
+      if (!/\d/.test(value) || value.length > 160) continue;
+      if (/^(?:opens?|opened|allow submissions from|开放|开放时间|开启|开始提交|允许提交的起始时间)$/.test(key)) dates.opens ??= value;
+      if (/^(?:due|due date|截止|截止时间|截止日期|到期|到期时间)$/.test(key)) dates.due ??= value;
+    }
+  }
+  return dates;
+})`
+
+interface LmcPageActivity { cmid: string; title: string; section: string; type: string; fileType: string; assignmentDates?: LmcAssignmentDates }
+export interface LmcPageDocument { recognized: boolean; auth: boolean; indexReady: boolean; title: string; activities: LmcPageActivity[] }
 export const lmcCourseInspection = String.raw`(() => {
   if(location.origin!=='https://core.xjtlu.edu.cn')return null;
+  const readDates = ${readAssignmentDates};
   const root=document.querySelector('#region-main')||document.body;
   const clean=el=>{if(!el)return '';const copy=el.cloneNode(true);copy.querySelectorAll('.accesshide,.sr-only,.visually-hidden,script,style').forEach(el=>el.remove());return (copy.textContent||'').replace(/\s+/g,' ').trim()};
   const seen=new Map(),activities=[];
@@ -70,15 +89,70 @@ export const lmcCourseInspection = String.raw`(() => {
     try{const u=new URL(a.href),parts=u.pathname.split('/');if(u.origin!==location.origin||parts.length!==4||parts[1]!=='mod'||parts[3]!=='view.php'||!/^[1-9]\d*$/.test(u.searchParams.get('id')||''))continue;
     const type=parts[2],cmid=u.searchParams.get('id'),key=type+':'+cmid;
     const activity=a.closest('.activity'),section=activity?.closest('li.section,[data-for="section"]');const image=activity?.querySelector('img.activityicon,img.icon');const iconPath=image?new URL(image.src).pathname:'',fileType=iconPath.split('/f/')[1]?.split('-')[0]||'';
-    if(seen.has(key)){if(fileType)seen.get(key).fileType=fileType;continue;}
+    const card = type === 'assign' ? activity || a.closest('[data-for="cmitem"]') : null;
+    const assignmentDates = card ? readDates(card) : undefined;
+    const previous = seen.get(key);
+    if (previous) {
+      if (fileType) previous.fileType = fileType;
+      if (assignmentDates) previous.assignmentDates = {
+        opens: assignmentDates.opens ?? previous.assignmentDates?.opens ?? null,
+        due: assignmentDates.due ?? previous.assignmentDates?.due ?? null
+      };
+      continue;
+    }
     const indexSection=a.closest('[id^="course-index-section-"],.courseindex-section');
     const sectionTitle=clean(indexSection?.querySelector('a[href*="/course/section.php"],.courseindex-section-title .courseindex-link'))||clean(section?.querySelector('.sectionname,[data-for="section_title"],h3'))||'课程内容';
-    const row={cmid,type,title:clean(a.querySelector('.instancename')||a)||type,section:sectionTitle,fileType};seen.set(key,row);activities.push(row);
+    const row={cmid,type,title:clean(a.querySelector('.instancename')||a)||type,section:sectionTitle,fileType};
+    if (assignmentDates) row.assignmentDates = assignmentDates;
+    seen.set(key,row);activities.push(row);
     }catch{}if(activities.length>=5000)break;
   }
   const indexReady=!document.querySelector('#courseindex')||!!document.querySelector('#courseindex [data-for="section"],#courseindex [id^="course-index-section-"]');
   return {recognized:document.body.id.startsWith('page-course-view-'),auth:!!document.querySelector('input[type="password"]')||document.body.id==='page-login-index',indexReady,title:clean(document.querySelector('h1')),activities};
 })()`
+
+export function lmcAssignmentCardsScript(moduleIds: string[]): string {
+  // A tile can list an assignment without rendering its card. Request only those known cards.
+  const requests = moduleIds.slice(0, 30).map((id, index) => ({ index, methodname: 'core_course_get_module', args: { id: Number(lmcId.parse(id)) } }))
+  return `(async () => {
+    if (location.origin !== ${JSON.stringify(LMC_ORIGIN)} || !globalThis.M?.cfg?.sesskey) return [];
+    const readDates = ${readAssignmentDates};
+    const requests = ${JSON.stringify(requests)};
+    try {
+      const url = new URL('/lib/ajax/service.php', location.origin);
+      url.searchParams.set('sesskey', M.cfg.sesskey);
+      url.searchParams.set('info', 'core_course_get_module');
+      const response = await fetch(url, { method: 'POST', credentials: 'same-origin', redirect: 'error',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requests), signal: AbortSignal.timeout(5000) });
+      if (!response.ok) return [];
+      const text = await response.text();
+      if (text.length > 2000000) return [];
+      const payload = JSON.parse(text);
+      if (!Array.isArray(payload)) return [];
+      const template = document.createElement('template');
+      const dates = [];
+      for (const { index, args: { id } } of requests) {
+        const item = payload[index];
+        if (item?.error !== false || typeof item.data !== 'string') continue;
+        template.innerHTML = item.data;
+        const card = template.content.querySelector('#module-' + id + '.modtype_assign');
+        if (card) dates.push([String(id), readDates(card)]);
+      }
+      return dates;
+    } catch { return []; }
+  })()`
+}
+
+export const lmcAssignmentPageInspection = String.raw`(() => {
+  if (location.origin !== ${JSON.stringify(LMC_ORIGIN)} || document.body.id !== 'page-mod-assign-view') return null;
+  return (${readAssignmentDates})(document.querySelector('#region-main') || document.body);
+})()`
+
+export function cleanLmcAssignmentDates(value: LmcAssignmentDates | null | undefined): LmcAssignmentDates | undefined {
+  const clean = (text: string | null | undefined): string | null => typeof text === 'string' ? lmcText(text, 160) || null : null
+  const opens = clean(value?.opens), due = clean(value?.due)
+  return opens || due ? { opens, due } : undefined
+}
 
 export interface LmcFilesDocument { recognized: boolean; auth: boolean; ready: boolean; files: { url: string; name: string; path: string }[] }
 export const lmcFileInspection = String.raw`(() => {

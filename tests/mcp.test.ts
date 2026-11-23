@@ -74,7 +74,10 @@ function fixture() {
       getState: () => structuredClone(lmc),
       async refresh() { lmc.coursesAt = stamp; lmc.coursesComplete = true; lmc.courses = [{ id: '1', title: 'Demo', shortName: 'DEMO101' }] },
       async loadCourse(id) {
-        lmc.modules[id] = { courseId: id, activities: [{ id: folderId, title: 'Readings', section: 'Week 1', type: 'folder', fileType: '', downloadable: false }], folders: {}, fetchedAt: stamp, loading: false, issue: null }
+        lmc.modules[id] = { courseId: id, activities: [
+          { id: folderId, title: 'Readings', section: 'Week 1', type: 'folder', fileType: '', downloadable: false },
+          { id: 'activity:1:assign:3', title: 'Example assignment', section: 'Week 1', type: 'assign', fileType: '', downloadable: false, assignmentDates: { opens: null, due: '16 November 2026, 11:55 PM' } }
+        ], folders: {}, fetchedAt: stamp, loading: false, issue: null }
       },
       async loadFolder(id) {
         lmc.modules['1'].folders[id] = { files: [{ id: fileId, name: 'Example.pdf', path: 'Reading/Example.pdf', extension: 'pdf' }], fetchedAt: stamp, loading: false, issue: null }
@@ -287,7 +290,9 @@ it('authenticates and calls all sixteen workbook tools through the official clie
   assert.equal(notices.data.hiddenSignInCount, 1)
   assert.equal(notices.data.notifications.length, 1)
   assert.equal((await call('list_lmc_modules')).data.courses[0].courseId, '1')
-  assert.equal((await call('get_module_contents', { courseId: '1' })).data.activities[0].folderId, f.folderId)
+  const moduleContents = await call('get_module_contents', { courseId: '1' })
+  assert.equal(moduleContents.data.activities[0].folderId, f.folderId)
+  assert.deepEqual(moduleContents.data.activities[1].assignmentDates, { opens: null, due: '16 November 2026, 11:55 PM' })
   assert.equal((await call('get_module_contents', { courseId: '1', folderId: f.folderId })).data.files[0].fileId, f.fileId)
   const download = await call('download_lmc_file', { courseId: '1', folderId: f.folderId, fileName: 'Example.pdf', path: 'Reading/Example.pdf' })
   assert.equal(download.complete, false)
@@ -340,6 +345,58 @@ it('MCP service copies configuration through the main process and revokes old ke
   assert.equal(JSON.parse(copied).mcpServers.xjtlu.headers.Authorization, `Bearer ${token}`)
   service.copyConfig('codex', text => { copied = text })
   assert.match(copied, /\[mcp_servers.xjtlu\]/)
+  const address = service.getStatus().url
+  assert.ok(address)
+  service.copyConfig('deepseek', text => { copied = text })
+  const harness = JSON.parse(copied).xjtlu
+  assert.deepEqual(harness, {
+    transport: 'streamable-http',
+    url: address,
+    headers: { Authorization: 'Bearer ${credential:XJTLU_MCP_TOKEN}' },
+    enabled: true
+  })
+  assert.ok(!copied.includes(token))
+  service.copyConfig('workbuddy', text => { copied = text })
+  const workbuddy = JSON.parse(copied).mcpServers.xjtlu
+  assert.deepEqual(workbuddy, {
+    type: 'streamableHttp', url: address, headers: { Authorization: `Bearer ${token}` }, timeout: 30000
+  })
+  service.copyConfig('mimocode', text => { copied = text })
+  const mimo = JSON.parse(copied).mcp.xjtlu
+  assert.deepEqual(mimo, {
+    type: 'remote', url: address, oauth: false, enabled: true, headers: { Authorization: `Bearer ${token}` }
+  })
+  service.copyConfig('kimi', text => { copied = text })
+  const kimi = JSON.parse(copied).mcpServers.xjtlu
+  assert.deepEqual(kimi, { url: address, bearerTokenEnvVar: 'XJTLU_MCP_TOKEN' })
+  assert.ok(!copied.includes(token))
+  const fixtureEnv = { XJTLU_MCP_TOKEN: token }
+  const clientConfigs = [
+    { url: harness.url, auth: harness.headers.Authorization.replace('${credential:XJTLU_MCP_TOKEN}', fixtureEnv.XJTLU_MCP_TOKEN) },
+    { url: workbuddy.url, auth: workbuddy.headers.Authorization },
+    { url: mimo.url, auth: mimo.headers.Authorization },
+    { url: kimi.url, auth: `Bearer ${fixtureEnv[kimi.bearerTokenEnvVar as keyof typeof fixtureEnv]}` }
+  ]
+  for (const { url, auth } of clientConfigs) {
+    const client = await connect(url, auth.slice('Bearer '.length))
+    try {
+      assert.equal((await client.listTools()).tools.length, 16)
+      const status = await client.callTool({ name: 'get_connection_status', arguments: {} })
+      assert.equal((status.structuredContent as { ok?: boolean } | undefined)?.ok, true)
+    } finally {
+      await client.close()
+    }
+  }
+  service.copyConfig('url', text => { copied = text })
+  const connectorUrl = copied
+  assert.equal(connectorUrl, service.getStatus().url)
+  service.copyConfig('bearer', text => { copied = text })
+  assert.equal(copied, `Bearer ${token}`)
+  const connector = await connect(connectorUrl, copied.slice('Bearer '.length))
+  assert.equal((await connector.listTools()).tools.length, 16)
+  const connectorStatus = await connector.callTool({ name: 'get_connection_status', arguments: {} })
+  assert.equal((connectorStatus.structuredContent as { ok?: boolean } | undefined)?.ok, true)
+  await connector.close()
   const old = token
   await service.rotateKey()
   const url = service.getStatus().url!

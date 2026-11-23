@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, net, protocol, safeStorage, session, shell } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, Menu, net, protocol, safeStorage, session, shell, Tray } from 'electron'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { AmsService } from './ams-service'
@@ -14,9 +14,15 @@ import { amsRelativeDays } from '../shared/module-attendance'
 import { CampusQueries } from '../mcp/campus-queries'
 import { McpKeyStore } from '../infrastructure/mcp-key-store'
 import { McpService } from './mcp-service'
-import { codexPluginLink, inspectCodexPairing, inspectCodexPlugin, registerCodexMarketplace, saveCodexPairingKey } from './codex-plugin'
+import { codexPluginLink, inspectCodexAgent, installCodexAgent, uninstallCodexAgent } from './codex-plugin'
+import { inspectMimoAgent, saveMimoInstall, uninstallMimo } from './mimo-code'
+import { inspectWorkbuddyAgent, saveWorkbuddyInstall, uninstallWorkbuddy } from './workbuddy'
+import { inspectDeepseekAgent, installDeepseekPlugin, saveDeepseekKey, uninstallDeepseekPlugin } from './deepseek-harness'
+import { inspectKimiAgent, installKimiCode, uninstallKimiCode } from './kimi-code'
+import { AGENT_CLIENTS } from '../shared/mcp'
 import { LmcService } from './lmc-service'
 import { z } from 'zod'
+import trayIcon from './assets/tray.ico?asset'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const smoke = process.argv.includes('--smoke-test')
@@ -30,6 +36,8 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: t
 if (!app.requestSingleInstanceLock()) app.quit()
 else {
   let main: BrowserWindow | null = null
+  let tray: Tray | null = null
+  let quitting = false
   let ams: AmsService
   let ebridge: EbridgeService
   let library: LibraryService
@@ -60,6 +68,13 @@ else {
     homeReported=true
   }
   const devUrl = process.env.ELECTRON_RENDERER_URL
+
+  const showWorkbench = (): void => {
+    if (!main || main.isDestroyed() || quitting) return
+    if (main.isMinimized()) main.restore()
+    main.show()
+    main.focus()
+  }
 
   const trustedSender = (event: Electron.IpcMainInvokeEvent): void => {
     const frame = event.senderFrame
@@ -120,6 +135,36 @@ else {
       encrypt: value => safeStorage.encryptStringAsync(value),
       decrypt: async value => (await safeStorage.decryptStringAsync(value)).result
     }), app.getVersion(), state => { if (main && !main.isDestroyed()) main.webContents.send('mcp:state', state) })
+    const agentClient = z.enum(AGENT_CLIENTS)
+    const appData = app.getPath('appData')
+    const version = app.getVersion()
+    const codexCatalog = join(userData, 'agent-plugins', 'codex')
+    const clients = {
+      codex: {
+        inspect: (token: string) => inspectCodexAgent(codexCatalog, app.getAppPath(), token, version),
+        install: (token: string) => installCodexAgent(codexCatalog, app.getAppPath(), token, version),
+        uninstall: uninstallCodexAgent
+      },
+      deepseek: {
+        inspect: (token: string) => inspectDeepseekAgent(appData, token, version),
+        install: async (token: string) => {
+          await installDeepseekPlugin(appData, userData, version)
+          await saveDeepseekKey(appData, token)
+        },
+        uninstall: () => uninstallDeepseekPlugin(appData)
+      },
+      workbuddy: {
+        inspect: inspectWorkbuddyAgent,
+        install: async (token: string) => { await saveWorkbuddyInstall(token) },
+        uninstall: uninstallWorkbuddy
+      },
+      mimo: {
+        inspect: (token: string) => inspectMimoAgent(token, version),
+        install: (token: string, url: string) => saveMimoInstall(token, url, version),
+        uninstall: uninstallMimo
+      },
+      kimi: { inspect: inspectKimiAgent, install: installKimiCode, uninstall: uninstallKimiCode }
+    }
     const handlers = {
       'lmc:get-state': () => lmc.getState(),
       'lmc:connect': () => lmc.connect(),
@@ -134,17 +179,24 @@ else {
       'lmc:reveal-download': (id: unknown) => lmc.revealDownload(id),
       'lmc:open-source': (value: unknown) => lmc.openSource(z.union([z.object({ kind: z.literal('home') }).strict(), z.object({ kind: z.enum(['course', 'activity', 'notification']), id: z.string().min(1).max(200) }).strict()]).parse(value)),
       'mcp:get-status': () => mcp.getStatus(),
-      'mcp:get-codex-plugin-status': async () => {
-        const [plugin, pairing] = await Promise.all([inspectCodexPlugin(app.getAppPath()), mcp.inspectCodexPairing(inspectCodexPairing)])
-        return { ...plugin, pairing }
-      },
       'mcp:open-codex-plugin': async () => {
-        const link = await codexPluginLink(app.getAppPath())
-        await mcp.pairCodex(saveCodexPairingKey)
-        await registerCodexMarketplace(app.getAppPath())
+        await shell.openExternal(await codexPluginLink(codexCatalog, app.getAppPath()))
+      },
+      'mcp:get-agent-install-status': (value: unknown) => mcp.inspectClient(clients[agentClient.parse(value)].inspect),
+      'mcp:install-agent': (value: unknown) => mcp.pairClient(clients[agentClient.parse(value)].install),
+      'mcp:uninstall-agent': (value: unknown) => mcp.uninstallClient(clients[agentClient.parse(value)].uninstall),
+      'mcp:open-doubao-setup': async () => {
+        const link = 'doubaoapp://doubaoapp/open-url?needlaunchlog=1&channel=chat&url=https%3A%2F%2Fwww.doubao.com%2Fchat%2Fskills'
+        if (process.platform !== 'win32' || !app.getApplicationNameForProtocol(link)) {
+          throw new Error('Doubao desktop launch handler unavailable')
+        }
+        mcp.copyConfig('url', text => clipboard.writeText(text))
         await shell.openExternal(link)
       },
-      'mcp:copy-config': (value: unknown) => { if (value !== 'json' && value !== 'codex' && value !== 'token') throw new Error('Unsupported configuration'); mcp.copyConfig(value, text => clipboard.writeText(text)) },
+      'mcp:copy-config': (value: unknown) => {
+        const format = z.enum(['json', 'codex', 'deepseek', 'mimocode', 'workbuddy', 'kimi', 'token', 'url', 'bearer']).parse(value)
+        mcp.copyConfig(format, text => clipboard.writeText(text))
+      },
       'mcp:set-enabled': (value: unknown) => { if (typeof value !== 'boolean') throw new Error('Unsupported setting'); return mcp.setEnabled(value) },
       'mcp:rotate-key': () => mcp.rotateKey(),
       'ams:get-state': () => ams.getState(),
@@ -193,15 +245,37 @@ else {
       backgroundColor: '#f6f7fb', autoHideMenuBar: true,
       webPreferences: { preload: join(here, '../preload/index.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true }
     })
-    // The academic connectors may own hidden windows. Closing the workbench
-    // must quit those too, otherwise a later start targets a destroyed window.
-    main.on('closed', () => { main = null; app.quit() })
+    if (process.platform === 'win32') {
+      try {
+        tray = new Tray(trayIcon)
+        tray.setToolTip('XJTLU-MCP · 校园工作台')
+        tray.on('click', showWorkbench)
+        tray.setContextMenu(Menu.buildFromTemplate([
+          { label: '打开校园工作台', click: showWorkbench },
+          { type: 'separator' },
+          { label: '退出 XJTLU-MCP', click: () => app.quit() }
+        ]))
+      } catch {
+        tray?.destroy()
+        tray = null
+        console.error('The system tray could not start.')
+      }
+    }
+    main.on('close', (event) => {
+      if (quitting || !tray || tray.isDestroyed()) return
+      event.preventDefault()
+      main?.hide()
+    })
+    main.on('session-end', () => app.quit())
+    main.on('closed', () => {
+      main = null
+      if (!quitting) app.quit()
+    })
     main.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     main.webContents.on('will-navigate', (event) => event.preventDefault())
     if (devUrl) await main.loadURL(devUrl)
     else await main.loadURL('app://desktop/index.html')
-    main.show()
-    main.focus()
+    showWorkbench()
     void mcp.setEnabled(true)
     if (smoke) main.setTitle('XJTLU-MCP · UI 测试')
     if (!smoke && !process.argv.includes('--inspect-lmc')) void ams.openLogin().catch(() => console.error('AMS initial connection failed.'))
@@ -211,7 +285,14 @@ else {
     if (!smoke && process.argv.includes('--connect-library')) void library.connect().catch(() => console.error('Library connection failed.'))
   }).catch(() => { console.error('The desktop application could not start.'); app.quit() })
 
-  app.on('second-instance', () => { if (main && !main.isDestroyed()) { main.show(); main.focus() } })
+  app.on('second-instance', showWorkbench)
   app.on('window-all-closed', () => app.quit())
-  app.on('before-quit', () => { void mcp?.dispose(); lmc?.dispose(); ams?.dispose(); ebridge?.dispose(); library?.dispose() })
+  app.on('before-quit', () => {
+    if (quitting) return
+    quitting = true
+    tray?.destroy()
+    tray = null
+    void mcp?.dispose()
+    lmc?.dispose(); ams?.dispose(); ebridge?.dispose(); library?.dispose()
+  })
 }

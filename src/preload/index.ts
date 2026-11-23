@@ -27,8 +27,11 @@ const bridge: CampusBridge = { lmc: {
   }
 }, mcp: {
   getStatus: () => ipcRenderer.invoke('mcp:get-status'),
-  getCodexPluginStatus: () => ipcRenderer.invoke('mcp:get-codex-plugin-status'),
   openCodexPlugin: () => ipcRenderer.invoke('mcp:open-codex-plugin'),
+  getAgentInstallStatus: client => ipcRenderer.invoke('mcp:get-agent-install-status', client),
+  installAgent: client => ipcRenderer.invoke('mcp:install-agent', client),
+  uninstallAgent: client => ipcRenderer.invoke('mcp:uninstall-agent', client),
+  openDoubaoSetup: () => ipcRenderer.invoke('mcp:open-doubao-setup'),
   copyConfig: format => ipcRenderer.invoke('mcp:copy-config', format),
   setEnabled: enabled => ipcRenderer.invoke('mcp:set-enabled', enabled),
   rotateKey: () => ipcRenderer.invoke('mcp:rotate-key'),

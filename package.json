@@ -1,6 +1,6 @@
 {
   "name": "xjtlu-mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "XJTLU campus hub for AMS attendance, eBridge timetables and library seat reservations",
   "type": "module",
@@ -18,6 +18,7 @@
   "dependencies": {
     "@modelcontextprotocol/node": "2.1.2",
     "@modelcontextprotocol/server": "2.4.0",
+    "jsonc-parser": "3.3.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "zod": "^4.0.0"

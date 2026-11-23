@@ -23,7 +23,11 @@ http_headers = { Authorization = "Bearer <从应用复制的访问密钥>" }
 
 按客户端的配置入口添加即可；Codex 的设置依据见[官方 MCP 说明](https://learn.chatgpt.com/docs/extend/mcp)。通用 JSON 复制结果采用 `mcpServers.xjtlu`，包含 `type: "http"`、`url` 和 `headers.Authorization`；其他客户端可能使用不同的配置外层结构。
 
-关闭桌面应用会停止服务。「关闭本次连接」只关闭当前运行中的 MCP；下次启动默认重新开启。「重置访问密钥」会断开现有连接并重新开启服务，旧配置立即失效，需要重新复制。
+豆包电脑版在「本地电脑」模式下使用自定义连接器。在工作台「Agent 连接」页点击「在豆包中配置」，打开豆包并复制服务地址。将地址和「复制授权值」取得的完整 `Authorization` 值填入豆包的 HTTP 连接器表单并保存。[豆包接入说明](agent-clients/doubao/README.md)
+
+最小化窗口后，MCP 继续在本机运行。Windows 上点窗口右上角 × 会收起到系统托盘，点击托盘中的 XJTLU-MCP 图标可重新打开窗口。要完全退出，右键托盘图标选择「退出 XJTLU-MCP」，此时 MCP 会停止。
+
+「关闭本次连接」仅停止当前运行中的 MCP。下次启动默认重新开启。「重置访问密钥」会断开现有连接并重新开启服务，旧配置立即失效，需要重新复制。
 
 如果端口 39527 被其他程序占用，Agent 连接页会显示错误；应用中的学校功能仍可使用。本版不自动安装 Electron，不自动改写客户端配置，不提供公网连接或 stdio 桥接。
 
@@ -47,7 +51,7 @@ http_headers = { Authorization = "Bearer <从应用复制的访问密钥>" }
 | `get_library_reservations` | `date?` | 当前账号在该日期的预约，默认今天 |
 | `get_lmc_notification` | `from?`、`to?`（年月日），`includeSignIn?` | 日期范围内的通知、正文、时间和已读状态 |
 | `list_lmc_modules` | `refresh?` | 当前可见课程的 `courseId`、课程名和简称，保持 Core 最近访问顺序 |
-| `get_module_contents` | `courseId`、`folderId?`、`refresh?` | 课程目录的章节和活动类型；指定文件夹时返回文件名、相对路径和 `fileId` |
+| `get_module_contents` | `courseId`、`folderId?`、`refresh?` | 课程章节、活动类型和已读取到的作业时间 `assignmentDates`。指定文件夹时返回文件名、相对路径和 `fileId` |
 | `download_lmc_file` | `courseId` 和 `fileId`，或 `courseId`、`fileName`、`folderId?`、`path?`；或仅传 `downloadId` | 请求保存 LMC 原文件，或查询下载进度和结果 |
 
 调用示例：
@@ -73,6 +77,8 @@ http_headers = { Authorization = "Bearer <从应用复制的访问密钥>" }
 ### LMC 通知和资料
 
 在应用内连接 LMC 后即可查询。通知默认读取最近四个自然月，指定日期时包含首尾两天，回溯上限同为四个自然月。登录提醒默认隐藏，可用 `includeSignIn: true` 包含。读取达到分页或时间限制时，结果会标记不完整。
+
+`get_module_contents` 的作业可包含 `assignmentDates.opens` 和 `assignmentDates.due`，保留学校显示的日期及时间文本。单项未读取到时为 `null`，两项都未读取到时省略 `assignmentDates`。
 
 下载前先调用 `list_lmc_modules` 和 `get_module_contents` 定位课程及文件。按名称定位时，文件夹内的 `path` 是文件相对路径，目录中的独立资源则用所在章节。桌面选择保存位置后，用 `downloadId` 查询进度，完成时 `downloaded` 为 true。文件内容、学校下载链接及本机保存路径均保留在桌面端。
 
