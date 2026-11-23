@@ -21,7 +21,7 @@ internal static class WindowsPackage
     static readonly string Source = AppDomain.CurrentDomain.BaseDirectory;
     static readonly string Data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XJTLU-MCP-AMS");
     static readonly string StartLink = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), Product + ".lnk");
-    static readonly string InstallDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", Product);
+    static readonly string DesktopLink = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Product + ".lnk");
 
     [STAThread]
     static int Main(string[] args)
@@ -96,6 +96,18 @@ internal static class WindowsPackage
         return files;
     }
 
+    static bool ShortcutTargets(string shortcut, string folder)
+    {
+        if (!File.Exists(shortcut)) return false;
+        try
+        {
+            dynamic shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell"));
+            string target = shell.CreateShortcut(shortcut).TargetPath;
+            return !String.IsNullOrWhiteSpace(target) && Same(target, Path.Combine(folder, App));
+        }
+        catch (Exception) { return false; }
+    }
+
     static T Busy<T>(string label, Func<T> operation)
     {
         T result = default(T);
@@ -150,6 +162,88 @@ internal static class WindowsPackage
     }
 
 #if SETUP
+    static readonly string DefaultInstallDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", Product);
+
+    sealed class InstallOptions
+    {
+        public string Folder { get; private set; }
+        public bool DesktopShortcut { get; private set; }
+        public InstallOptions(string folder, bool desktopShortcut) { Folder = folder; DesktopShortcut = desktopShortcut; }
+    }
+
+    static string ValidateInstallFolder(string path)
+    {
+        if (String.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path) || !Path.GetPathRoot(path).EndsWith("\\"))
+            throw new IOException("请选择完整的安装路径，例如 D:\\Apps\\XJTLU-MCP。");
+        string folder = Full(path);
+        if (Same(folder, Path.GetPathRoot(folder)) || Same(folder, Data) ||
+            folder.StartsWith(Full(Data) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("请选择独立的程序目录。");
+        CheckLink(folder);
+        if (File.Exists(DiskPath(folder))) throw new IOException("安装路径指向了文件，请选择一个目录。");
+        return folder;
+    }
+
+    static string ValidateRegisteredFolder(string path)
+    {
+        try
+        {
+            string folder = ValidateInstallFolder(path);
+            ReadManifest(folder);
+            if (File.Exists(PackagePath(folder, App)) && File.Exists(PackagePath(folder, Uninstaller))) return folder;
+        }
+        catch (Exception)
+        {
+            // A damaged registration is never treated as a fresh install.
+        }
+        throw new IOException("无法确认已登记的 XJTLU-MCP 安装路径。请恢复原目录后再升级。\r\n\r\n" + path);
+    }
+
+    static InstallOptions ChooseInstallation()
+    {
+        using (var installed = Registry.CurrentUser.OpenSubKey(UninstallKey))
+        {
+            if (installed != null)
+            {
+                string folder = ValidateRegisteredFolder(installed.GetValue("InstallLocation") as string);
+                var confirm = MessageBox.Show("将在原目录升级 XJTLU-MCP。\r\n\r\n" + folder +
+                    "\r\n\r\n账号、会话和 Agent 配对设置将保留。", Product, MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
+                return confirm == DialogResult.OK ? new InstallOptions(folder, ShortcutTargets(DesktopLink, folder)) : null;
+            }
+        }
+        using (var form = new Form { Text = "安装 XJTLU-MCP", Width = 610, Height = 235,
+            StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false })
+        {
+            var heading = new Label { Text = "选择安装位置", AutoSize = true, Left = 18, Top = 18 };
+            var location = new TextBox { Text = DefaultInstallDir, Left = 18, Top = 52, Width = 460, AccessibleName = "安装路径" };
+            var browse = new Button { Text = "浏览…", Left = 488, Top = 49, Width = 83 };
+            var desktop = new CheckBox { Text = "在桌面创建快捷方式", AutoSize = true, Left = 18, Top = 94 };
+            var install = new Button { Text = "安装", Left = 385, Top = 140, Width = 86 };
+            var cancel = new Button { Text = "取消", Left = 485, Top = 140, Width = 86, DialogResult = DialogResult.Cancel };
+            InstallOptions selected = null;
+            browse.Click += delegate {
+                using (var picker = new FolderBrowserDialog { Description = "请选择 XJTLU-MCP 的程序目录", ShowNewFolderButton = true })
+                {
+                    if (Directory.Exists(location.Text)) picker.SelectedPath = location.Text;
+                    if (picker.ShowDialog(form) == DialogResult.OK) location.Text = picker.SelectedPath;
+                }
+            };
+            install.Click += delegate {
+                try
+                {
+                    var folder = ValidateInstallFolder(location.Text.Trim());
+                    selected = new InstallOptions(folder, desktop.Checked);
+                    form.DialogResult = DialogResult.OK;
+                }
+                catch (Exception error) { MessageBox.Show(form, error.Message, Product, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+            };
+            form.Controls.AddRange(new Control[] { heading, location, browse, desktop, install, cancel });
+            form.AcceptButton = install;
+            form.CancelButton = cancel;
+            return form.ShowDialog() == DialogResult.OK ? selected : null;
+        }
+    }
+
     static void Extract(string folder)
     {
         Directory.CreateDirectory(folder);
@@ -175,9 +269,11 @@ internal static class WindowsPackage
 
     static void Setup()
     {
-        if (MessageBox.Show("安装 " + Product + " 到当前 Windows 用户\r\n\r\n" + InstallDir +
-                "\r\n\r\n安装会沿用现有本机数据和 Agent 接入。", Product,
-                MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
+        var options = ChooseInstallation();
+        if (options == null) return;
+        string folder = options.Folder;
+        CheckShortcut(StartLink, folder);
+        if (options.DesktopShortcut) CheckShortcut(DesktopLink, folder);
         Busy("正在安装 XJTLU-MCP…", () => {
             string staging = Path.Combine(Path.GetTempPath(), Product + "-setup-" + Guid.NewGuid().ToString("N"));
             try
@@ -185,30 +281,30 @@ internal static class WindowsPackage
                 Extract(staging);
                 string[] files = ReadManifest(staging);
                 var prior = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                CheckLink(InstallDir);
-                if (Directory.Exists(InstallDir))
+                CheckLink(folder);
+                if (Directory.Exists(DiskPath(folder)))
                 {
-                    if (!File.Exists(Path.Combine(InstallDir, FileList)) && Directory.EnumerateFileSystemEntries(InstallDir).Any())
-                        throw new IOException("安装目录已有文件。请将原解压版移到其他目录后重试。");
-                    if (File.Exists(Path.Combine(InstallDir, FileList))) prior.UnionWith(ReadManifest(InstallDir));
+                    if (!File.Exists(PackagePath(folder, FileList)) && Directory.EnumerateFileSystemEntries(DiskPath(folder)).Any())
+                        throw new IOException("所选目录已有其他文件。请选择空目录，或使用已有的 XJTLU-MCP 程序目录。");
+                    if (File.Exists(PackagePath(folder, FileList))) prior.UnionWith(ReadManifest(folder));
                     foreach (var relative in files)
-                        if (File.Exists(DiskPath(PackagePath(InstallDir, relative))) && !prior.Contains(relative))
+                        if (File.Exists(DiskPath(PackagePath(folder, relative))) && !prior.Contains(relative))
                             throw new IOException("安装目录有同名的用户文件，请先移出该文件。\r\n" + relative);
                 }
                 StopWorkbench(staging);
                 var migrated = Maintenance(staging, "register-upgrade");
                 if (migrated.Item1 != 0) throw new IOException("Codex 插件目录未能迁移。请退出 Codex 并重试。");
-                Directory.CreateDirectory(InstallDir);
-                File.WriteAllLines(PackagePath(InstallDir, FileList), prior.Union(files).ToArray(), Encoding.UTF8);
+                Directory.CreateDirectory(DiskPath(folder));
+                File.WriteAllLines(PackagePath(folder, FileList), prior.Union(files).ToArray(), Encoding.UTF8);
                 foreach (var relative in files.Where(name => name != FileList))
                 {
-                    string destination = PackagePath(InstallDir, relative);
+                    string destination = PackagePath(folder, relative);
                     Directory.CreateDirectory(DiskPath(Path.GetDirectoryName(destination)));
                     File.Copy(DiskPath(PackagePath(staging, relative)), DiskPath(destination), true);
                 }
-                RemoveKnownFiles(InstallDir, prior.Except(files, StringComparer.OrdinalIgnoreCase));
-                File.Copy(PackagePath(staging, FileList), PackagePath(InstallDir, FileList), true);
-                Register();
+                RemoveKnownFiles(folder, prior.Except(files, StringComparer.OrdinalIgnoreCase));
+                File.Copy(PackagePath(staging, FileList), PackagePath(folder, FileList), true);
+                Register(options);
                 return true;
             }
             finally { if (Directory.Exists(staging)) Directory.Delete(DiskPath(staging), true); }
@@ -216,23 +312,37 @@ internal static class WindowsPackage
         MessageBox.Show("安装完成。可以从开始菜单打开 XJTLU-MCP。", Product, MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
-    static void Register()
+    static void CheckShortcut(string shortcut, string folder)
     {
+        if (File.Exists(shortcut) && !ShortcutTargets(shortcut, folder))
+            throw new IOException("已有同名快捷方式指向其他位置。请重命名该快捷方式后重试。\r\n\r\n" + shortcut);
+    }
+
+    static void SaveShortcut(string shortcut, string folder)
+    {
+        CheckShortcut(shortcut, folder);
+        dynamic shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell"));
+        dynamic link = shell.CreateShortcut(shortcut);
+        link.TargetPath = Path.Combine(folder, App);
+        link.WorkingDirectory = folder;
+        link.Save();
+    }
+
+    static void Register(InstallOptions options)
+    {
+        string folder = options.Folder;
         using (var key = Registry.CurrentUser.CreateSubKey(UninstallKey))
         {
             key.SetValue("DisplayName", Product);
             key.SetValue("DisplayVersion", FileVersionInfo.GetVersionInfo(Assembly.GetExecutingAssembly().Location).ProductVersion);
-            key.SetValue("InstallLocation", InstallDir);
-            key.SetValue("DisplayIcon", Path.Combine(InstallDir, App));
-            key.SetValue("UninstallString", Quote(Path.Combine(InstallDir, Uninstaller)));
+            key.SetValue("InstallLocation", folder);
+            key.SetValue("DisplayIcon", Path.Combine(folder, App));
+            key.SetValue("UninstallString", Quote(Path.Combine(folder, Uninstaller)));
             key.SetValue("NoModify", 1);
             key.SetValue("NoRepair", 1);
         }
-        dynamic shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell"));
-        dynamic link = shell.CreateShortcut(StartLink);
-        link.TargetPath = Path.Combine(InstallDir, App);
-        link.WorkingDirectory = InstallDir;
-        link.Save();
+        SaveShortcut(StartLink, folder);
+        if (options.DesktopShortcut) SaveShortcut(DesktopLink, folder);
     }
 #else
     static void BeginRemove()
@@ -285,7 +395,8 @@ internal static class WindowsPackage
         }
         if (registryMatches)
         {
-            File.Delete(StartLink);
+            if (ShortcutTargets(StartLink, folder)) File.Delete(StartLink);
+            if (ShortcutTargets(DesktopLink, folder)) File.Delete(DesktopLink);
             Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, false);
         }
         MessageBox.Show("已移除 XJTLU-MCP 程序及核对通过的校园 Agent 接入。\r\n"

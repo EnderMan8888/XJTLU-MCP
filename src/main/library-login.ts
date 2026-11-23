@@ -2,6 +2,7 @@ import {BrowserWindow,session} from 'electron'
 import {LIBRARY_HOME,LIBRARY_ORIGIN} from '../shared/library'
 import {schoolLoginAction,type ConnectionPhase} from '../shared/ams'
 import type {AccountService} from '../services/account-service'
+import {isLibraryLoginNavigation} from '../security/library-navigation'
 import {buildAutomaticLoginScript,buildLoginInspectionScript,isAuthenticationOrigin,isCredentialPage,SCHOOL_VERIFICATION_MESSAGE} from '../security/login-policy'
 import {isAbortedNavigation,schoolLoginFailure,SCHOOL_MANUAL_LOGIN_MESSAGE,showSchoolLoginWindow} from './school-login-window'
 
@@ -28,7 +29,6 @@ export class LibraryLogin {
   private stop():void{if(this.timer)clearInterval(this.timer);this.timer=null}
   private valid(g:number,win:BrowserWindow):boolean{return g===this.generation&&this.win===win&&!win.isDestroyed()}
   read():LibraryAuth|null{return this.auth?{...this.auth}:null}
-  private allowed(raw:string):boolean{try{const u=new URL(raw);return isAuthenticationOrigin(raw)||(u.origin===LIBRARY_ORIGIN&&!u.username&&!u.password)}catch{return false}}
   async connect():Promise<void>{
     if(this.phase==='manual-login-required')return
     if(this.timer){if(this.phase==='verification-required')this.show();return}
@@ -46,9 +46,21 @@ export class LibraryLogin {
     previous?.destroy()
     const win=new BrowserWindow({title:'西浦图书馆 · 官方认证',width:1180,height:820,show:mode!=='background',autoHideMenuBar:true,webPreferences:{session:this.school,nodeIntegration:false,contextIsolation:true,sandbox:true,backgroundThrottling:false}})
     this.win=win
-    win.webContents.setWindowOpenHandler(({url})=>{if(this.allowed(url))void win.loadURL(url).catch(()=>{});return {action:'deny'}})
-    win.webContents.on('will-navigate',(event,url)=>{if(!this.allowed(url))event.preventDefault()})
-    win.webContents.on('will-redirect',(event,url)=>{if(!this.allowed(url))event.preventDefault()})
+    const guardNavigation=(event:{url:string;isMainFrame:boolean;preventDefault():void}):void=>{
+      if(isLibraryLoginNavigation(event.url))return
+      event.preventDefault()
+      if(event.isMainFrame)this.pageFailed(g,win,'图书馆跳转到了无法确认的页面。')
+    }
+    win.webContents.on('will-navigate',guardNavigation)
+    win.webContents.on('will-redirect',guardNavigation)
+    win.webContents.setWindowOpenHandler(({url})=>{
+      if(isLibraryLoginNavigation(url))this.loadPage(g,win,url)
+      return {action:'deny'}
+    })
+    win.webContents.on('did-fail-load',(_event,code,_description,_url,mainFrame)=>{
+      if(mainFrame&&code!==-3)this.pageFailed(g,win,'图书馆页面加载失败，请检查网络。')
+    })
+    win.webContents.on('render-process-gone',()=>this.pageFailed(g,win,'图书馆页面意外关闭。'))
     win.on('closed',()=>{
       if(this.win!==win)return
       this.win=null
@@ -60,9 +72,18 @@ export class LibraryLogin {
     else this.status('authenticating','正在连接图书馆学校账号…')
     this.watch(g,win)
     win.webContents.on('did-finish-load',()=>void this.tick(g,win))
-    void win.loadURL(LIBRARY_HOME).catch(error=>{
-      if(!isAbortedNavigation(error)&&this.valid(g,win)&&this.timer&&this.phase!=='verification-required')this.loginFailed('图书馆页面加载失败，请检查网络。',false)
+    this.loadPage(g,win,LIBRARY_HOME)
+  }
+  private loadPage(g:number,win:BrowserWindow,url:string):void{
+    void win.loadURL(url).catch(error=>{
+      if(!isAbortedNavigation(error))this.pageFailed(g,win,'图书馆页面加载失败，请检查网络。')
     })
+  }
+  private pageFailed(g:number,win:BrowserWindow,message:string):void{
+    if(!this.valid(g,win)||!this.timer)return
+    this.win=null
+    this.loginFailed(message,false)
+    queueMicrotask(()=>{if(!win.isDestroyed())win.destroy()})
   }
   private attention(message:string):void{
     const first=this.phase!=='verification-required'
@@ -106,7 +127,7 @@ export class LibraryLogin {
     finally{
       this.ticking=false
       if(this.valid(g,win)&&this.timer&&!this.manual&&Date.now()>this.deadline){
-        this.loginFailed('图书馆认证等待超时。')
+        this.pageFailed(g,win,'图书馆认证等待超时。')
       }
     }
   }

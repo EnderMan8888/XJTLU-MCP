@@ -22,7 +22,7 @@ Notification 展示标题、正文、时间和学校的已读状态，支持分�
 
 在 [Releases](https://github.com/EnderMan8888/XJTLU-MCP/releases) 下载 Windows x64 安装 EXE 或解压 ZIP。安装版可从开始菜单打开，解压版请完整解压后双击 `XJTLU-MCP.exe`。两个版本均附带 SHA-256 校验值，无需另装 Node.js 或 Electron。发布包未签名。
 
-升级前先从系统托盘退出 XJTLU-MCP，再覆盖安装或完整解压新版。学校账号、会话和已启用的教务缓存保存在同一 Windows 用户的 `%APPDATA%\XJTLU-MCP-AMS`。安装版可通过 Windows「已安装的应用」卸载，两个版本也都可以运行程序目录中的 `Uninstall.exe`。卸载时可选择是否保留本机数据。详情见 [v2.2.0 发布说明](releases/v2.2.0.md)。
+安装版首次运行时可选择目录和是否创建桌面快捷方式。升级会沿用已登记的安装目录。使用解压版的用户应先从托盘退出工作台，再完整解压新版。学校账号、会话和已启用的教务缓存保存在同一 Windows 用户的 `%APPDATA%\XJTLU-MCP-AMS`。安装版可通过 Windows「已安装的应用」卸载，两个版本也都可以运行程序目录中的 `Uninstall.exe`。卸载时可选择是否保留本机数据。详情见 [v2.3.0 发布说明](releases/v2.3.0.md)。
 
 首页「账号与登录」和「AMS 出勤」是同级入口，侧栏也可直接进入。学校账号归公共账号模块管理，服务按需使用；断开 AMS 会保留公共账号。
 

@@ -1,6 +1,6 @@
 {
   "name": "xjtlu-campus",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "用本机 XJTLU-MCP 查询西浦课表、考试、成绩、考勤、图书馆座位和 Learning Mall Core。",
   "mcpServers": "./.mcp.json",
   "requires_local_executor": true,
