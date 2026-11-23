@@ -22,9 +22,9 @@ jobs:
         run: npm ci
       - name: Install Electron runtime on build runner
         run: npm run install:electron
-      - name: Build Windows installer and portable package
+      - name: Build Windows full and Lite packages
         run: npm run package:win
-      - name: Publish both Windows packages and checksums
+      - name: Publish three Windows packages and checksums
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -32,10 +32,11 @@ jobs:
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $setup = "dist/XJTLU-MCP-$version-win-x64-setup.exe"
           $zip = "dist/XJTLU-MCP-$version-win-x64.zip"
+          $lite = "dist/XJTLU-MCP-$version-win-x64-lite-setup.exe"
           $checksums = "dist/SHA256SUMS.txt"
-          foreach ($asset in @($setup, $zip, $checksums)) {
+          foreach ($asset in @($setup, $zip, $lite, $checksums)) {
             if (!(Test-Path -LiteralPath $asset -PathType Leaf)) { throw "Missing release asset $asset" }
           }
-          gh release create "v$version" $setup $zip $checksums --target $env:GITHUB_SHA --title "XJTLU-MCP V$version" --notes-file "releases/v$version.md"
+          gh release create "v$version" $setup $zip $lite $checksums --target $env:GITHUB_SHA --title "XJTLU-MCP V$version" --notes-file "releases/v$version.md"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

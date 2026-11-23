@@ -20,9 +20,9 @@ Notification 展示标题、正文、时间和学校的已读状态，支持分�
 
 ## 下载使用
 
-在 [Releases](https://github.com/EnderMan8888/XJTLU-MCP/releases) 下载 Windows x64 安装 EXE 或解压 ZIP。安装版可从开始菜单打开，解压版请完整解压后双击 `XJTLU-MCP.exe`。两个版本均附带 SHA-256 校验值，无需另装 Node.js 或 Electron。发布包未签名。
+在 [Releases](https://github.com/EnderMan8888/XJTLU-MCP/releases) 下载 Windows x64 完整安装 EXE 或完整解压 ZIP。安装版可从开始菜单打开，解压版请完整解压后双击 `XJTLU-MCP.exe`。已有兼容安装时可以使用 Lite EXE 原地更新。每个包都提供 SHA-256 校验值。发布包未签名。
 
-安装版首次运行时可选择目录和是否创建桌面快捷方式。升级会沿用已登记的安装目录。使用解压版的用户应先从托盘退出工作台，再完整解压新版。学校账号、会话和已启用的教务缓存保存在同一 Windows 用户的 `%APPDATA%\XJTLU-MCP-AMS`。安装版可通过 Windows「已安装的应用」卸载，两个版本也都可以运行程序目录中的 `Uninstall.exe`。卸载时可选择是否保留本机数据。详情见 [v2.3.0 发布说明](releases/v2.3.0.md)。
+安装版首次运行时可选择目录和是否创建桌面快捷方式。升级会沿用已登记的安装目录。受保护目录会通过 Windows UAC 请求程序文件操作权限。使用解压版的用户应先从托盘退出工作台，再完整解压新版。学校账号、会话和已启用的教务缓存保存在同一 Windows 用户的 `%APPDATA%\XJTLU-MCP-AMS`。安装版可通过 Windows「已安装的应用」卸载，程序目录中的 `Uninstall.exe` 也可用于卸载。卸载时可选择是否保留本机数据。详情见 [v2.3.1 发布说明](releases/v2.3.1.md)。
 
 首页「账号与登录」和「AMS 出勤」是同级入口，侧栏也可直接进入。学校账号归公共账号模块管理，服务按需使用；断开 AMS 会保留公共账号。
 
@@ -119,7 +119,7 @@ AMS「近期课表」的签到状态同样按 Module → 对应课程 → Detail
 
 Windows x64 本地执行 `npm run package:win`，复用已经安装的 Electron 运行时，生成 `dist/XJTLU-MCP-2.1.0-win-x64.zip` 和 `dist/SHA256SUMS.txt`。打包仅复制构建产物、生产依赖及运行时。已有同名输出时拒绝覆盖。
 
-推送新的 `releases/` 版本说明到 `main` 后，GitHub Actions 会构建并上传 Windows 安装 EXE、解压 ZIP 和校验文件。Release 标签指向该次源码提交。账号、学校 Cookie、调试目录、依赖、构建产物和导入的旧版工具不进入源码仓库。
+推送新的 `releases/` 版本说明到 `main` 后，GitHub Actions 会构建并上传 Windows 完整安装 EXE、完整解压 ZIP、Lite 更新 EXE 和校验文件。Release 标签指向该次源码提交。账号、学校 Cookie、调试目录、依赖、构建产物和导入的旧版工具不进入源码仓库。
 
 ## 技术资料
 

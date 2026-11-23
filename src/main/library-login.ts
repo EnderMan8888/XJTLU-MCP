@@ -1,8 +1,8 @@
-import {BrowserWindow,session} from 'electron'
+import {BrowserWindow,dialog,session,shell} from 'electron'
 import {LIBRARY_HOME,LIBRARY_ORIGIN} from '../shared/library'
 import {schoolLoginAction,type ConnectionPhase} from '../shared/ams'
 import type {AccountService} from '../services/account-service'
-import {isLibraryLoginNavigation} from '../security/library-navigation'
+import {isLibraryLoginNavigation,libraryNavigationLabel} from '../security/library-navigation'
 import {buildAutomaticLoginScript,buildLoginInspectionScript,isAuthenticationOrigin,isCredentialPage,SCHOOL_VERIFICATION_MESSAGE} from '../security/login-policy'
 import {isAbortedNavigation,schoolLoginFailure,SCHOOL_MANUAL_LOGIN_MESSAGE,showSchoolLoginWindow} from './school-login-window'
 
@@ -49,7 +49,10 @@ export class LibraryLogin {
     const guardNavigation=(event:{url:string;isMainFrame:boolean;preventDefault():void}):void=>{
       if(isLibraryLoginNavigation(event.url))return
       event.preventDefault()
-      if(event.isMainFrame)this.pageFailed(g,win,'图书馆跳转到了无法确认的页面。')
+      if(event.isMainFrame){
+        const destination=libraryNavigationLabel(event.url)
+        this.pageFailed(g,win,destination?`图书馆跳转被拦截（${destination}）。`:'图书馆跳转到了无法确认的页面。')
+      }
     }
     win.webContents.on('will-navigate',guardNavigation)
     win.webContents.on('will-redirect',guardNavigation)
@@ -58,14 +61,17 @@ export class LibraryLogin {
       return {action:'deny'}
     })
     win.webContents.on('did-fail-load',(_event,code,_description,_url,mainFrame)=>{
-      if(mainFrame&&code!==-3)this.pageFailed(g,win,'图书馆页面加载失败，请检查网络。')
+      if(mainFrame&&code!==-3)this.pageFailed(g,win,`图书馆页面加载失败（错误码 ${code}）。`)
     })
-    win.webContents.on('render-process-gone',()=>this.pageFailed(g,win,'图书馆页面意外关闭。'))
+    win.webContents.on('render-process-gone',(_event,details)=>this.pageFailed(g,win,`图书馆页面意外关闭（${details.reason}）。`))
     win.on('closed',()=>{
       if(this.win!==win)return
       this.win=null
+      const wasWatching=Boolean(this.timer)
       this.stop()
-      if(this.phase==='manual-login-required')this.loginFailed('学校窗口已关闭。',false)
+      if(this.phase==='manual-login-required'){
+        if(wasWatching)this.loginFailed('学校窗口已关闭。',false)
+      }
       else if(!this.auth)this.status('idle','认证窗口已关闭，可重新连接学校账号。')
     })
     if(this.manual)this.status('manual-login-required',SCHOOL_MANUAL_LOGIN_MESSAGE)
@@ -81,9 +87,29 @@ export class LibraryLogin {
   }
   private pageFailed(g:number,win:BrowserWindow,message:string):void{
     if(!this.valid(g,win)||!this.timer)return
-    this.win=null
     this.loginFailed(message,false)
+    if(win.isVisible()){
+      queueMicrotask(()=>void this.showPageFailure(g,win,message))
+      return
+    }
+    this.win=null
     queueMicrotask(()=>{if(!win.isDestroyed())win.destroy()})
+  }
+  private async showPageFailure(g:number,win:BrowserWindow,message:string):Promise<void>{
+    if(!this.valid(g,win))return
+    try{
+      const {response}=await dialog.showMessageBox(win,{
+        type:'warning',title:'图书馆登录未完成',message,
+        detail:'重试会重新打开学校登录。在浏览器打开可以单独使用图书馆预约网页。',
+        buttons:['重试','在浏览器打开','关闭'],defaultId:0,cancelId:2,noLink:true
+      })
+      if(!this.valid(g,win))return
+      if(response===0)this.startLogin('manual')
+      else{
+        win.close()
+        if(response===1)await shell.openExternal(LIBRARY_HOME)
+      }
+    }catch{/* The workbench keeps the failure message and the manual login action. */}
   }
   private attention(message:string):void{
     const first=this.phase!=='verification-required'

@@ -1,13 +1,20 @@
-import { LIBRARY_ORIGIN } from '../shared/library.ts'
-import { isAuthenticationOrigin } from './login-policy.ts'
+const SCHOOL_DOMAIN = 'xjtlu.edu.cn'
 
-// The library can redirect to the university's access portal before its SSO.
-const TRUST_ORIGIN = 'https://trust.xjtlu.edu.cn'
-
+// Navigation may cross school services. The login policy separately controls credential entry.
 export function isLibraryLoginNavigation(raw: string): boolean {
-  if (isAuthenticationOrigin(raw)) return true
   try {
     const url = new URL(raw)
-    return !url.username && !url.password && (url.origin === LIBRARY_ORIGIN || url.origin === TRUST_ORIGIN)
+    const host = url.hostname.replace(/\.$/, '')
+    return url.protocol === 'https:' && !url.username && !url.password
+      && (host === SCHOOL_DOMAIN || host.endsWith(`.${SCHOOL_DOMAIN}`))
   } catch { return false }
+}
+
+export function libraryNavigationLabel(raw: string): string | null {
+  try {
+    const url = new URL(raw)
+    if (url.protocol === 'https:' || url.protocol === 'http:') return `${url.protocol}//${url.host}`
+    if (url.protocol === 'about:' && url.pathname === 'blank') return 'about:blank'
+    return url.protocol.slice(0, 32)
+  } catch { return null }
 }

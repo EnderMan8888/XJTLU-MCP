@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -11,7 +10,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-internal static class WindowsPackage
+internal static partial class WindowsPackage
 {
     const string Product = "XJTLU-MCP";
     const string App = Product + ".exe";
@@ -34,9 +33,21 @@ internal static class WindowsPackage
         {
 #if SETUP
             if (args.Length == 2 && args[0] == "--layout") { Extract(args[1]); return 0; }
+            if (args.Length == 2 && args[0] == "--write-files")
+            {
+                RequireAdministrator();
+                WriteProgramFiles(ValidateInstallFolder(args[1]));
+                return 0;
+            }
             Setup();
 #else
-            if (args.Length == 3 && args[0] == "--finish") FinishRemove(args[1], args[2] == "delete");
+            if (args.Length == 2 && args[0] == "--remove-files")
+            {
+                RequireAdministrator();
+                CheckFolderAncestors(args[1]);
+                RemoveWithRetry(args[1], ReadManifest(args[1]));
+            }
+            else if (args.Length == 3 && args[0] == "--finish") FinishRemove(args[1], args[2] == "delete");
             else BeginRemove();
 #endif
             return 0;
@@ -44,7 +55,12 @@ internal static class WindowsPackage
         catch (Exception error)
         {
             if (args.Length > 0 && args[0] == "--layout") Console.Error.WriteLine(error.Message);
-            else MessageBox.Show(error.Message, Product, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            else
+            {
+                string target = args.Length == 2 && (args[0] == "--write-files" || args[0] == "--remove-files")
+                    ? "目标目录\r\n" + args[1] + "\r\n\r\n" : "";
+                MessageBox.Show(target + error.Message, Product, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
             return 1;
         }
     }
@@ -64,7 +80,8 @@ internal static class WindowsPackage
     static string PackagePath(string folder, string relative)
     {
         var segments = relative.Split('/');
-        if (segments.Any(part => String.IsNullOrWhiteSpace(part) || part == "." || part == ".." || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || part.Contains("\\")))
+        if (segments.Any(part => String.IsNullOrWhiteSpace(part) || part.EndsWith(".") || part.EndsWith(" ")
+            || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || part.Contains("\\")))
             throw new IOException("安装包文件路径无效。");
         string current = Full(folder);
         CheckLink(current);
@@ -143,10 +160,10 @@ internal static class WindowsPackage
         throw new IOException("请从系统托盘完全退出 XJTLU-MCP，再重试。");
     }
 
-    static Tuple<int, string> Maintenance(string folder, string action)
+    static Tuple<int, string> Maintenance(string folder, string action, string runtimeFolder = null)
     {
         var script = PackagePath(folder, "resources/app/out/main/maintenance.js");
-        var start = new ProcessStartInfo(Path.Combine(folder, App), Quote(script) + " " + action) {
+        var start = new ProcessStartInfo(Path.Combine(runtimeFolder ?? folder, App), Quote(script) + " " + action) {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
             RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8
         };
@@ -179,7 +196,7 @@ internal static class WindowsPackage
         if (Same(folder, Path.GetPathRoot(folder)) || Same(folder, Data) ||
             folder.StartsWith(Full(Data) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new IOException("请选择独立的程序目录。");
-        CheckLink(folder);
+        CheckFolderAncestors(folder);
         if (File.Exists(DiskPath(folder))) throw new IOException("安装路径指向了文件，请选择一个目录。");
         return folder;
     }
@@ -190,7 +207,7 @@ internal static class WindowsPackage
         {
             string folder = ValidateInstallFolder(path);
             ReadManifest(folder);
-            if (File.Exists(PackagePath(folder, App)) && File.Exists(PackagePath(folder, Uninstaller))) return folder;
+            if (File.Exists(PackagePath(folder, "resources/app/package.json"))) return folder;
         }
         catch (Exception)
         {
@@ -205,12 +222,22 @@ internal static class WindowsPackage
         {
             if (installed != null)
             {
+#if LITE
+                string folder;
+                try { folder = ValidateRegisteredFolder(installed.GetValue("InstallLocation") as string); }
+                catch (IOException) { throw new IOException(LiteNeedsSetup); }
+                ValidateLiteRuntime(folder);
+#else
                 string folder = ValidateRegisteredFolder(installed.GetValue("InstallLocation") as string);
+#endif
                 var confirm = MessageBox.Show("将在原目录升级 XJTLU-MCP。\r\n\r\n" + folder +
                     "\r\n\r\n账号、会话和 Agent 配对设置将保留。", Product, MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
                 return confirm == DialogResult.OK ? new InstallOptions(folder, ShortcutTargets(DesktopLink, folder)) : null;
             }
         }
+#if LITE
+        throw new IOException(LiteNeedsSetup);
+#else
         using (var form = new Form { Text = "安装 XJTLU-MCP", Width = 610, Height = 235,
             StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false })
         {
@@ -242,29 +269,7 @@ internal static class WindowsPackage
             form.CancelButton = cancel;
             return form.ShowDialog() == DialogResult.OK ? selected : null;
         }
-    }
-
-    static void Extract(string folder)
-    {
-        Directory.CreateDirectory(folder);
-        using (var payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("Payload.zip"))
-        {
-            if (payload == null) throw new IOException("安装包缺少程序文件。");
-            // ZIP offsets are relative to the beginning of the standalone resource.
-            using (var zip = new ZipArchive(payload, ZipArchiveMode.Read))
-            foreach (var entry in zip.Entries)
-            {
-                if (entry.Name.Length == 0) continue;
-                string root = Product + "-" + FileVersionInfo.GetVersionInfo(Assembly.GetExecutingAssembly().Location).ProductVersion + "-win-x64/";
-                string entryName = entry.FullName.Replace('\\', '/');
-                if (!entryName.StartsWith(root, StringComparison.Ordinal)) throw new IOException("安装包目录名无效。");
-                string path = PackagePath(folder, entryName.Substring(root.Length));
-                Directory.CreateDirectory(DiskPath(Path.GetDirectoryName(path)));
-                using (var input = entry.Open())
-                using (var output = new FileStream(DiskPath(path), FileMode.CreateNew))
-                    input.CopyTo(output);
-            }
-        }
+#endif
     }
 
     static void Setup()
@@ -274,42 +279,27 @@ internal static class WindowsPackage
         string folder = options.Folder;
         CheckShortcut(StartLink, folder);
         if (options.DesktopShortcut) CheckShortcut(DesktopLink, folder);
-        Busy("正在安装 XJTLU-MCP…", () => {
+        bool installed = Busy("正在更新 XJTLU-MCP 程序文件…", () => {
+            bool elevate = NeedsProgramFileElevation(folder);
             string staging = Path.Combine(Path.GetTempPath(), Product + "-setup-" + Guid.NewGuid().ToString("N"));
             try
             {
                 Extract(staging);
-                string[] files = ReadManifest(staging);
-                var prior = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                CheckLink(folder);
-                if (Directory.Exists(DiskPath(folder)))
+                string runtime = IsLite ? folder : staging;
+                StopWorkbench(runtime);
+                if (elevate)
                 {
-                    if (!File.Exists(PackagePath(folder, FileList)) && Directory.EnumerateFileSystemEntries(DiskPath(folder)).Any())
-                        throw new IOException("所选目录已有其他文件。请选择空目录，或使用已有的 XJTLU-MCP 程序目录。");
-                    if (File.Exists(PackagePath(folder, FileList))) prior.UnionWith(ReadManifest(folder));
-                    foreach (var relative in files)
-                        if (File.Exists(DiskPath(PackagePath(folder, relative))) && !prior.Contains(relative))
-                            throw new IOException("安装目录有同名的用户文件，请先移出该文件。\r\n" + relative);
+                    if (!RunElevated("--write-files", folder)) return false;
                 }
-                StopWorkbench(staging);
-                var migrated = Maintenance(staging, "register-upgrade");
+                else WriteProgramFiles(folder);
+                var migrated = Maintenance(staging, "register-upgrade", runtime);
                 if (migrated.Item1 != 0) throw new IOException("Codex 插件目录未能迁移。请退出 Codex 并重试。");
-                Directory.CreateDirectory(DiskPath(folder));
-                File.WriteAllLines(PackagePath(folder, FileList), prior.Union(files).ToArray(), Encoding.UTF8);
-                foreach (var relative in files.Where(name => name != FileList))
-                {
-                    string destination = PackagePath(folder, relative);
-                    Directory.CreateDirectory(DiskPath(Path.GetDirectoryName(destination)));
-                    File.Copy(DiskPath(PackagePath(staging, relative)), DiskPath(destination), true);
-                }
-                RemoveKnownFiles(folder, prior.Except(files, StringComparer.OrdinalIgnoreCase));
-                File.Copy(PackagePath(staging, FileList), PackagePath(folder, FileList), true);
                 Register(options);
                 return true;
             }
             finally { if (Directory.Exists(staging)) Directory.Delete(DiskPath(staging), true); }
         });
-        MessageBox.Show("安装完成。可以从开始菜单打开 XJTLU-MCP。", Product, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        if (installed) MessageBox.Show("安装完成。可以从开始菜单打开 XJTLU-MCP。", Product, MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     static void CheckShortcut(string shortcut, string folder)
@@ -386,13 +376,12 @@ internal static class WindowsPackage
                 registryMatches = true;
             }
         }
-        if (deleteData && Directory.Exists(Data)) EraseData(Data);
-        // The first process may still be leaving the directory when this copy starts.
-        for (int attempt = 1; ; attempt++)
+        if (NeedsProgramFileRemovalElevation(folder, files))
         {
-            try { RemoveKnownFiles(folder, files); break; }
-            catch (IOException) { if (attempt == 20) throw; Thread.Sleep(200); }
+            if (!RunElevated("--remove-files", folder)) return;
         }
+        else RemoveWithRetry(folder, files);
+        if (deleteData && Directory.Exists(Data)) EraseData(Data);
         if (registryMatches)
         {
             if (ShortcutTargets(StartLink, folder)) File.Delete(StartLink);
@@ -403,6 +392,16 @@ internal static class WindowsPackage
             + (deleteData ? "已删除本机数据。" : "已保留本机数据。")
             + "\r\n若在豆包中手动添加过 xjtlu，请在豆包「管理 → 连接器」移除。",
             Product, MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    static void RemoveWithRetry(string folder, string[] files)
+    {
+        // The original process can still be leaving the directory when its temporary copy starts.
+        for (int attempt = 1; ; attempt++)
+        {
+            try { RemoveKnownFiles(folder, files); return; }
+            catch (IOException) { if (attempt == 20) throw; Thread.Sleep(200); }
+        }
     }
 
     static void EraseData(string directory)
