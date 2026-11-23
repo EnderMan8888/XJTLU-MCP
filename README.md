@@ -20,9 +20,9 @@ Notification 展示标题、正文、时间和学校的已读状态，支持分�
 
 ## 下载使用
 
-在 [Releases](https://github.com/EnderMan8888/XJTLU-MCP/releases) 下载 Windows x64 压缩包，完整解压后双击 `XJTLU-MCP.exe`。无需安装 Node.js 或 Electron，请保留同目录的运行文件。发布包附带 SHA256 校验文件，本版本未进行代码签名。
+在 [Releases](https://github.com/EnderMan8888/XJTLU-MCP/releases) 下载 Windows x64 安装 EXE 或解压 ZIP。安装版可从开始菜单打开，解压版请完整解压后双击 `XJTLU-MCP.exe`。两个版本均附带 SHA-256 校验值，无需另装 Node.js 或 Electron。发布包未签名。
 
-升级时先退出 XJTLU-MCP，将新版完整解压到新目录，双击其中的 `XJTLU-MCP.exe`。确认正常后，可以把新版文件夹放回原来的完整路径，以保留旧桌面快捷方式。学校账号、会话和已启用的教务缓存保存在同一 Windows 用户的 `%APPDATA%\XJTLU-MCP-AMS`。若学校会话已经过期，按提示完成登录验证即可。详情见 [V2.1 升级说明](releases/v2.1.0.md)。
+升级前先从系统托盘退出 XJTLU-MCP，再覆盖安装或完整解压新版。学校账号、会话和已启用的教务缓存保存在同一 Windows 用户的 `%APPDATA%\XJTLU-MCP-AMS`。安装版可通过 Windows「已安装的应用」卸载，两个版本也都可以运行程序目录中的 `Uninstall.exe`。卸载时可选择是否保留本机数据。详情见 [v2.2.0 发布说明](releases/v2.2.0.md)。
 
 首页「账号与登录」和「AMS 出勤」是同级入口，侧栏也可直接进入。学校账号归公共账号模块管理，服务按需使用；断开 AMS 会保留公共账号。
 
@@ -119,7 +119,7 @@ AMS「近期课表」的签到状态同样按 Module → 对应课程 → Detail
 
 Windows x64 本地执行 `npm run package:win`，复用已经安装的 Electron 运行时，生成 `dist/XJTLU-MCP-2.1.0-win-x64.zip` 和 `dist/SHA256SUMS.txt`。打包仅复制构建产物、生产依赖及运行时。已有同名输出时拒绝覆盖。
 
-推送新的 `releases/` 版本说明到 `main` 会自动构建并发布相应版本，Release 标签指向该次源码提交。账号、学校 Cookie、调试目录、依赖、构建产物和导入的旧版工具不进入源码仓库。
+推送新的 `releases/` 版本说明到 `main` 后，GitHub Actions 会构建并上传 Windows 安装 EXE、解压 ZIP 和校验文件。Release 标签指向该次源码提交。账号、学校 Cookie、调试目录、依赖、构建产物和导入的旧版工具不进入源码仓库。
 
 ## 技术资料
 

@@ -70,7 +70,7 @@ function AgentClientCard({ client, name, summary, api, ready, busy, children }: 
     <div className="mcp-tools" aria-live="polite" aria-busy={checking || Boolean(action)}>
       <div><strong>安装状态</strong><span>{status ? agentInstallationLabels[status.installation] : api ? '正在检查…' : '无法确认'}{status?.version && ` · v${status.version}`}</span></div>
       {status?.pairing && <div><strong>访问密钥</strong><span>{pairingLabels[status.pairing]}</span></div>}
-      {status?.locations.map(({ label, path }) => <div key={path}><strong>{label}</strong><code className="mcp-location">{path}</code></div>)}
+      {status?.locations.map(({ label, path }) => <div key={label}><strong>{label}</strong><code className="mcp-location">{path}</code></div>)}
       {status?.detail && <div><strong>连接说明</strong><span>{status.detail}</span></div>}
     </div>
     <div className="actions mcp-actions">

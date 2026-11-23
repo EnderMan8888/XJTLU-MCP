@@ -55,7 +55,7 @@ export class LibraryService implements AccountConsumer {
     this.pending=task;return task
   }
   connect():Promise<void>{return this.login.connect()}
-  showLogin():Promise<void>{return this.login.openSource()}
+  showLogin():Promise<void>{return this.login.showLogin()}
   openSource():Promise<void>{return this.login.openSource()}
   private auth():LibraryAuth{const auth=this.login.read();if(!auth)throw new LibraryError('auth','请先连接学校账号，再查询具体座位和预约。');return auth}
   private floor(id:number):LibraryFloor{const floor=this.state.floors.find(f=>f.id===id);if(!floor)throw new LibraryError('validation','请先更新楼层列表，再选择学校提供的楼层。');return floor}

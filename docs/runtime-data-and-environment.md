@@ -6,7 +6,7 @@
 
 ## 1. 结论
 
-- 持久化环境变量：**1 个**，为当前 Windows 用户的 `XJTLU_CODEX_MCP_TOKEN`，在插件安装或配对时写入。
+- 持久化环境变量：**1 个**，为当前 Windows 用户的 `XJTLU_MCP_TOKEN`，在支持共享密钥的客户端安装或配对时写入。
 - 系统级环境变量：**0 个**；当前代码没有修改 Windows 系统 `PATH`。
 - 打包脚本额外使用 **4 个临时环境变量**，只传给相应子进程，不写入 Windows 用户或系统环境。
 - 普通运行的数据主要位于 `%APPDATA%\XJTLU-MCP-AMS\`，包括账号凭据、MCP 密钥、可选教务缓存，以及 Electron 的学校会话和浏览器缓存。
@@ -19,7 +19,7 @@
 
 | 名称 | 作用范围 | 用途 | 写入时机 | 退出后是否保留 |
 | --- | --- | --- | --- | --- |
-| `XJTLU_CODEX_MCP_TOKEN` | Windows 当前用户 | 供 Codex 校园插件读取 MCP 配对密钥 | 点击 ChatGPT 卡片的「安装」或运行插件安装脚本 | 保留 |
+| `XJTLU_MCP_TOKEN` | Windows 当前用户 | Codex 等客户端共用的 MCP 配对密钥 | 安装或重新配对 | 保留 |
 
 Windows 将该用户环境变量保存在注册表 `HKEY_CURRENT_USER\Environment`，它不是某个目录中的独立配置文件。本机已确认存在该变量，系统级没有同名变量。
 
@@ -107,7 +107,7 @@ Windows 将该用户环境变量保存在注册表 `HKEY_CURRENT_USER\Environmen
 | `%USERPROFILE%\.codex\plugins\cache\xjtlu-local\xjtlu-campus\<版本>\` | 已安装版本的校园插件清单和 MCP 配置 |
 | `%APPDATA%\XJTLU-MCP-AMS\agent-plugins\codex\` | 工作台登记给 Codex 的本机插件目录 |
 
-校园插件缓存内已确认有 `.mcp.json` 和 `.codex-plugin\plugin.json`。其中的 MCP 配置只声明 `XJTLU_CODEX_MCP_TOKEN` 变量名。版本更新后缓存目录中的版本号可能变化。
+校园插件的 `.mcp.json` 声明共享变量 `XJTLU_MCP_TOKEN`。已经安装的旧插件可能仍引用 `XJTLU_CODEX_MCP_TOKEN`，可在工作台的 ChatGPT 卡片点击「重新安装」更新缓存，然后完全退出并重开 Codex。
 
 这里只统计与校园插件直接相关的配置和文件，不将整个 `.codex` 目录中的其他聊天、日志或插件资料归因于本程序。
 

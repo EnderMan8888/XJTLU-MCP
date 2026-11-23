@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process'
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
-import type { AgentInstallStatus, CodexPairingStatus } from '../shared/mcp.ts'
+import type { AgentInstallStatus } from '../shared/mcp.ts'
+import { inspectAgentKey, saveAgentKey } from './windows-agent-key.ts'
 
 const run = promisify(execFile)
 const marketplaceName = 'xjtlu-local'
@@ -12,6 +13,7 @@ const pluginName = 'xjtlu-campus'
 const pluginId = `${pluginName}@${marketplaceName}`
 const marketplaceFile = '.agents/plugins/marketplace.json'
 const manifestFile = `plugins/${pluginName}/.codex-plugin/plugin.json`
+const mcpFile = '.mcp.json'
 const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 const options = { windowsHide: true, timeout: 10_000 }
 const installationList = z.object({
@@ -19,7 +21,6 @@ const installationList = z.object({
 })
 const marketplaceList = z.object({ marketplaces: z.array(z.object({ name: z.string(), root: z.string() })) })
 const installResult = z.object({ pluginId: z.string(), version: z.string() })
-const pairingStates = z.enum(['paired', 'unpaired', 'outdated', 'stored'])
 
 async function findCodex(): Promise<string> {
   if (process.platform !== 'win32') throw new Error('本机 Codex 插件只支持 Windows。')
@@ -51,7 +52,7 @@ async function availableCatalog(catalog: string, appPath: string): Promise<strin
 
 async function stageCodexMarketplace(catalog: string, appPath: string, version: string): Promise<void> {
   const source = join(appPath, 'codex-plugin')
-  const files = [manifestFile, `plugins/${pluginName}/.mcp.json`, marketplaceFile]
+  const files = [manifestFile, `plugins/${pluginName}/${mcpFile}`, marketplaceFile]
   const contents = await Promise.all(files.map(file => readFile(join(source, file), 'utf8')))
   const manifest = JSON.parse(contents[0])
   contents[0] = `${JSON.stringify({ ...manifest, version }, null, 2)}\n`
@@ -63,8 +64,9 @@ async function stageCodexMarketplace(catalog: string, appPath: string, version: 
 }
 
 async function registerCodexMarketplace(executable: string, catalog: string): Promise<void> {
-  const { marketplaces } = await listCodexMarketplaces(executable)
-  const previous = marketplaces.find(entry => entry.name === marketplaceName)
+  // Codex can add the new catalog even when an old location makes listing fail.
+  const listed = await listCodexMarketplaces(executable).catch(() => undefined)
+  const previous = listed?.marketplaces.find(entry => entry.name === marketplaceName)
   if (previous && resolve(previous.root).toLowerCase() === resolve(catalog).toLowerCase()) return
   if (previous) await run(executable, ['plugin', 'marketplace', 'remove', marketplaceName, '--json'], options)
   try {
@@ -95,22 +97,34 @@ export async function inspectCodexAgent(catalog: string, appPath: string, token:
     listCodexMarketplaces(executable)
   ])
   const registered = catalogs.status === 'fulfilled' ? catalogs.value.marketplaces.find(entry => entry.name === marketplaceName) : undefined
-  status.locations.push({ label: '插件来源', path: registered?.root ?? root })
+  const registeredRoot = registered && await access(join(registered.root, marketplaceFile)).then(() => registered.root, () => undefined)
+  status.locations.push({ label: '插件来源', path: registeredRoot ?? root })
+  if (catalogs.status === 'rejected' || (registered && !registeredRoot)) {
+    status.detail = '现有插件目录无法核对，点击安装可重新登记。'
+  }
   if (installed.status !== 'fulfilled') return status
   const plugin = installed.value.installed.find(entry => entry.pluginId === pluginId)
   if (!plugin) return { ...status, installation: 'not-installed' }
+  let needsKeyMigration = false
   if (plugin.version && /^[0-9A-Za-z][0-9A-Za-z.+-]*$/.test(plugin.version)) {
     const cache = join(process.env.CODEX_HOME?.trim() || join(homedir(), '.codex'), 'plugins', 'cache', marketplaceName, pluginName, plugin.version)
-    if (await access(cache).then(() => true, () => false)) status.locations.unshift({ label: '插件目录', path: cache })
+    if (await access(cache).then(() => true, () => false)) {
+      status.locations.unshift({ label: '插件目录', path: cache })
+      needsKeyMigration = await readFile(join(cache, mcpFile), 'utf8')
+        .then(text => JSON.parse(text)?.mcpServers?.[pluginName]?.bearer_token_env_var === 'XJTLU_CODEX_MCP_TOKEN')
+        .catch(() => false)
+    }
   }
-  const detail = plugin.version !== version ? `可更新至 v${version}，点击重新安装即可更新。`
-    : registered ? undefined : '插件目录尚未登记，重新安装即可登记。'
+  const detail = status.detail ?? (needsKeyMigration ? '插件仍引用旧的密钥变量，点击重新安装即可改用共享密钥。'
+    : plugin.version !== version ? `可更新至 v${version}，点击重新安装即可更新。`
+    : registered ? undefined : '插件目录尚未登记，重新安装即可登记。')
   return { ...status, installation: plugin.enabled ? 'installed' : 'disabled', version: plugin.version ?? undefined,
-    pairing: await inspectCodexPairing(token), detail, removable: true }
+    pairing: needsKeyMigration ? 'outdated' : await inspectAgentKey(token), detail, removable: true }
 }
 
 export async function installCodexAgent(catalog: string, appPath: string, token: string, version: string): Promise<void> {
   const executable = await findCodex().catch(() => { throw new Error('未找到本机 Codex。') })
+  await saveAgentKey(token)
   try {
     await stageCodexMarketplace(catalog, appPath, version)
     await registerCodexMarketplace(executable, catalog)
@@ -120,7 +134,6 @@ export async function installCodexAgent(catalog: string, appPath: string, token:
   } catch {
     throw new Error('无法安装 XJTLU-MCP 插件。请确认本机 Codex 和插件目录可用。')
   }
-  await saveCodexPairingKey(token)
 }
 
 export async function uninstallCodexAgent(): Promise<void> {
@@ -130,39 +143,45 @@ export async function uninstallCodexAgent(): Promise<void> {
   })
 }
 
-function runPairingCommand(command: string, token: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    // Keep the key out of the command line, stdout and renderer.
-    const child = execFile(powershell, ['-NoProfile', '-NonInteractive', '-Command', command], options, (error, stdout) => {
-      if (error) reject(new Error('无法访问本机 Codex 配对密钥。'))
-      else resolve(stdout.trim())
-    })
-    child.stdin?.on('error', () => { /* A failed child reports an error through execFile. */ })
-    child.stdin?.end(token + '\n')
+export async function cleanupCodexAgent(catalog: string): Promise<boolean> {
+  const home = process.env.CODEX_HOME?.trim() || join(homedir(), '.codex')
+  const cache = join(home, 'plugins', 'cache', marketplaceName, pluginName)
+  const config = await readFile(join(home, 'config.toml'), 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+    return ''
   })
-}
-
-export async function inspectCodexPairing(token: string): Promise<CodexPairingStatus> {
-  if (process.platform !== 'win32') return 'unknown'
-  const command = [
-    "$ErrorActionPreference='Stop'",
-    '$key=[Console]::In.ReadLine()',
-    "$stored=[Environment]::GetEnvironmentVariable('XJTLU_CODEX_MCP_TOKEN',[EnvironmentVariableTarget]::User)",
-    "if (!$stored) { 'unpaired' } elseif (!$key) { 'stored' } elseif ($stored -ceq $key) { 'paired' } else { 'outdated' }"
-  ].join('; ')
-  const result = await runPairingCommand(command, token).catch(() => '')
-  return pairingStates.safeParse(result).data ?? 'unknown'
-}
-
-export async function saveCodexPairingKey(token: string): Promise<void> {
-  if (process.platform !== 'win32' || !/^[a-f0-9]{64}$/.test(token)) {
-    throw new Error('本机 Codex 插件配对不可用。')
+  const present = await access(cache).then(() => true, () => false)
+  const registered = config.includes(marketplaceName)
+  if (!registered && !present && !await access(catalog).then(() => true, () => false)) return false
+  if (registered || present) {
+    const executable = await findCodex()
+    const { stdout } = await run(executable, ['plugin', 'list', '--json'], options)
+    if (installationList.parse(JSON.parse(stdout)).installed.some(entry => entry.pluginId === pluginId) || present) {
+      await uninstallCodexAgent()
+    }
+    if ((await listCodexMarketplaces(executable)).marketplaces.some(entry => entry.name === marketplaceName)) {
+      await run(executable, ['plugin', 'marketplace', 'remove', marketplaceName, '--json'], options)
+      if ((await listCodexMarketplaces(executable)).marketplaces.some(entry => entry.name === marketplaceName)) throw new Error('Codex 插件目录仍在登记中。')
+    }
+    if (await access(cache).then(() => true, () => false)) {
+      if ((await readdir(cache)).length) throw new Error('Codex 插件缓存仍在使用。')
+    }
   }
-  const command = [
-    "$ErrorActionPreference='Stop'",
-    '$key=[Console]::In.ReadLine()',
-    "if ($key -cnotmatch '\\A[0-9a-f]{64}\\z') { exit 2 }",
-    "[Environment]::SetEnvironmentVariable('XJTLU_CODEX_MCP_TOKEN',$key,[EnvironmentVariableTarget]::User)"
-  ].join('; ')
-  await runPairingCommand(command, token)
+  await rm(catalog, { recursive: true, force: true })
+  return true
+}
+
+export async function migrateCodexMarketplace(catalog: string, appPath: string, version: string): Promise<void> {
+  const home = process.env.CODEX_HOME?.trim() || join(homedir(), '.codex')
+  const config = await readFile(join(home, 'config.toml'), 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+    return ''
+  })
+  if (!config.includes(marketplaceName)) return
+  const executable = await findCodex().catch(() => null)
+  if (!executable) return
+  const current = (await listCodexMarketplaces(executable)).marketplaces.find(entry => entry.name === marketplaceName)
+  if (!current || resolve(current.root).toLowerCase() === resolve(catalog).toLowerCase()) return
+  await stageCodexMarketplace(catalog, appPath, version)
+  await registerCodexMarketplace(executable, catalog)
 }

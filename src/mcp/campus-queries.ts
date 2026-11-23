@@ -125,9 +125,9 @@ export class CampusQueries {
     const ams = this.sources.ams.getState(), ebridge = this.sources.ebridge.getState(), library = this.sources.library.getState()
     const status = (phase: ConnectionPhase) => ({
       phase, connected: phase === 'connected',
-      needsLogin: ['credentials-required', 'expired', 'verification-required', 'idle'].includes(phase) ? true : phase === 'connected' ? false : null,
+      needsLogin: ['credentials-required', 'expired', 'verification-required', 'manual-login-required', 'idle'].includes(phase) ? true : phase === 'connected' ? false : null,
       needsVerification: phase === 'verification-required',
-      action: phase === 'connected' ? null : phase === 'verification-required' ? '在桌面应用的学校窗口完成验证。' : phase === 'credentials-required' ? '在桌面应用首页设置学校账号。' : '在桌面应用检查或连接此服务。'
+      action: phase === 'connected' ? null : phase === 'verification-required' ? '在桌面应用的学校窗口完成验证。' : phase === 'manual-login-required' ? '在桌面应用点击“手动登录”，并在学校窗口完成登录。' : phase === 'credentials-required' ? '在桌面应用首页设置学校账号。' : '在桌面应用检查或连接此服务。'
     })
     return this.result('campus', 'connected', new Date(this.now()).toISOString(), null, {
       checkedAt: new Date(this.now()).toISOString(),

@@ -4,7 +4,7 @@ if (-not $codex) {
     throw 'Codex CLI was not found. Open a terminal where the codex command is available.'
 }
 
-$keyName = 'XJTLU_CODEX_MCP_TOKEN'
+$keyName = 'XJTLU_MCP_TOKEN'
 $secureKey = Read-Host 'In XJTLU-MCP, open Agent Connection and copy the access key. Paste it here' -AsSecureString
 $keyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
 try {

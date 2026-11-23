@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -149,7 +149,9 @@ const writeCredential = `
       path: join(dshHome, '.credentials.yaml'), dshHome, watch: false
     })
     const ref = credentialRef(keyRef)
-    if (action === 'inspect') {
+    if (action === 'remove') {
+      await root.credentials.unset(ref)
+    } else if (action === 'inspect') {
       const stored = await root.credentials.resolve(ref)
       console.log(stored?.source !== 'file' ? 'unpaired' : !token ? 'stored' : stored.value === token ? 'paired' : 'outdated')
     } else {
@@ -161,7 +163,7 @@ const writeCredential = `
   }
 `
 
-async function useDeepseekCredential(appData: string, action: 'inspect' | 'save', token: string): Promise<string> {
+async function useDeepseekCredential(appData: string, action: 'inspect' | 'save' | 'remove', token: string): Promise<string> {
   const harness = installedHarness(appData)
   if (!harness) throw new Error('未找到 DeepSeek Harness 桌面端。')
   const runtime = join(harness, 'resources', 'app.asar', 'dsh', 'node_modules', '@deepseek-ai')
@@ -179,4 +181,15 @@ async function useDeepseekCredential(appData: string, action: 'inspect' | 'save'
 
 export async function saveDeepseekKey(appData: string, token: string): Promise<void> {
   await useDeepseekCredential(appData, 'save', token)
+}
+
+export async function cleanupDeepseekAgent(appData: string, userData: string): Promise<boolean> {
+  const copies = join(userData, 'agent-plugins', 'deepseek-harness')
+  const profile = desktopProfile()
+  const bundle = existsSync(join(profile, 'package.json')) ? await readBundle(profile) : undefined
+  if (!existsSync(copies) && !bundle?.enabled && !bundle?.version) return false
+  await uninstallDeepseekPlugin(appData)
+  if (existsSync(join(harnessHome(), '.credentials.yaml'))) await useDeepseekCredential(appData, 'remove', '')
+  await rm(copies, { recursive: true, force: true })
+  return true
 }

@@ -9,7 +9,13 @@ export const AMS_MODULES = `${AMS_ORIGIN}/xjtlu/stuapi/my-module/list`
 export const AMS_MODULE_RECORDS = `${AMS_ORIGIN}/xjtlu/stuapi/my-module/recordList`
 export const AMS_TERMS = `${AMS_ORIGIN}/xjtlu/xjtlu-base-academic-year-semester/getList`
 
-export type ConnectionPhase = 'idle' | 'authenticating' | 'loading' | 'connected' | 'verification-required' | 'credentials-required' | 'expired' | 'error'
+export type ConnectionPhase = 'idle' | 'authenticating' | 'loading' | 'connected' | 'verification-required' | 'manual-login-required' | 'credentials-required' | 'expired' | 'error'
+
+export function schoolLoginAction(phase: ConnectionPhase): '完成验证' | '手动登录' | null {
+  if (phase === 'verification-required') return '完成验证'
+  if (phase === 'manual-login-required') return '手动登录'
+  return null
+}
 export type AttendanceStatus = 'unmarked' | 'present' | 'absent' | 'authorized-absence' | 'unknown'
 
 export interface TimetableEntry {

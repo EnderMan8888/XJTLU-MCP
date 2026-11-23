@@ -2,7 +2,7 @@ import { BrowserWindow, session, type Session } from 'electron'
 import { AmsError, fetchTimetable } from '../providers/ams'
 import { academicTermSchema, fetchModuleSnapshot, fetchTermOptions } from '../providers/ams-modules'
 import { fetchModuleRecords, moduleAttendanceQuerySchema } from '../providers/ams-module-records'
-import { AMS_ENTRY, AMS_MODULE_SOURCE, AMS_ORIGIN, AMS_SOURCE, initialState, type AmsState } from '../shared/ams'
+import { AMS_ENTRY, AMS_MODULE_SOURCE, AMS_ORIGIN, AMS_SOURCE, initialState, schoolLoginAction, type AmsState } from '../shared/ams'
 import type { AcademicTerm, ModuleAttendanceSnapshot } from '../shared/modules'
 import { amsRelativeDays } from '../shared/module-attendance'
 import { ebridgeTimetableForDate } from '../shared/ebridge-timetable'
@@ -10,7 +10,7 @@ import type { EbridgeState } from '../shared/ebridge'
 import type { CredentialStatus } from '../shared/credentials'
 import type { AccountConsumer, AccountService } from '../services/account-service'
 import { buildAutomaticLoginScript, buildLoginInspectionScript, isAuthenticationOrigin, isCredentialPage, SCHOOL_VERIFICATION_MESSAGE } from '../security/login-policy'
-import { isAbortedNavigation, showSchoolLoginWindow } from './school-login-window'
+import { isAbortedNavigation, schoolLoginFailure, SCHOOL_MANUAL_LOGIN_MESSAGE, showSchoolLoginWindow } from './school-login-window'
 
 function isSchoolUrl(raw: string): boolean {
   try { const url = new URL(raw); return url.protocol === 'https:' && !url.username && !url.password && (url.hostname === 'xjtlu.edu.cn' || url.hostname.endsWith('.xjtlu.edu.cn')) } catch { return false }
@@ -33,6 +33,7 @@ export class AmsService implements AccountConsumer {
   private generation = 0
   private credentialGeneration = 0
   private submitted = false
+  private manual = false
   private deadline = 0
   private explicitWindow = false
   private authenticating = false
@@ -58,7 +59,7 @@ export class AmsService implements AccountConsumer {
 
   private attention(text: string): void {
     const newlyRequired = this.state.phase !== 'verification-required'
-    this.submitted = true
+    this.manual = true
     if (newlyRequired || this.state.message !== text) this.update({ phase: 'verification-required', message: text })
     if (newlyRequired) showSchoolLoginWindow(this.login)
   }
@@ -69,17 +70,26 @@ export class AmsService implements AccountConsumer {
     this.update({ phase: 'error', message: text })
   }
 
-  private beginLogin(show: boolean, target = AMS_ENTRY): void {
+  private loginFailed(message: string, keepWatching = this.manual): void {
+    if (!keepWatching) { this.authenticating = false; this.stopWatch() }
+    const text = schoolLoginFailure(message, keepWatching)
+    if (this.state.phase !== 'manual-login-required' || this.state.message !== text) this.update({ phase: 'manual-login-required', message: text })
+  }
+
+  private beginLogin(show: boolean, target = AMS_ENTRY, manual = false): void {
     if (this.disposed) return
     this.generation++
     this.credentialGeneration++
     this.pending = null
     this.submitted = false
+    this.manual = manual
     this.token = ''
     this.currentTerm = null
     this.stopWatch()
     this.authenticating = false
-    this.login?.destroy()
+    const previous = this.login
+    this.login = null
+    previous?.destroy()
     this.explicitWindow = show
     this.authenticating = true
     this.deadline = Date.now() + 60_000
@@ -99,18 +109,21 @@ export class AmsService implements AccountConsumer {
       if (this.login !== win) return
       this.login = null
       this.stopWatch()
-      if (this.authenticating) { this.authenticating = false; this.update({ phase: 'error', message: '认证窗口已关闭，可重新连接 AMS。' }) }
+      if (this.state.phase === 'manual-login-required') this.loginFailed('认证窗口已关闭。', false)
+      else if (this.authenticating) { this.authenticating = false; this.update({ phase: 'error', message: '认证窗口已关闭，可重新连接 AMS。' }) }
     })
-    this.update({ phase: 'authenticating', message: '正在后台恢复学校会话，必要时自动填写账号并登录…' })
+    this.update(manual ? { phase: 'manual-login-required', message: SCHOOL_MANUAL_LOGIN_MESSAGE }
+      : { phase: 'authenticating', message: '正在后台恢复学校会话，必要时自动填写账号并登录…' })
     this.watch = setInterval(probe, 700)
     void win.loadURL(target).catch(error => {
       if (!isAbortedNavigation(error) && this.login === win && !win.isDestroyed() && this.authenticating && this.state.phase !== 'verification-required') {
-        this.fail('学校页面加载失败，请检查网络后重试。')
+        this.loginFailed('学校页面加载失败，请检查网络。', false)
       }
     })
   }
 
   async openLogin(): Promise<void> {
+    if (this.state.phase === 'manual-login-required') return
     if (this.state.phase === 'verification-required') { await this.showLogin(); return }
     if (this.authenticating && this.login && !this.login.isDestroyed()) return
     if (this.token && this.state.phase === 'connected') { await this.refresh(); return }
@@ -119,8 +132,20 @@ export class AmsService implements AccountConsumer {
   }
 
   async showLogin(): Promise<void> {
-    if (this.login && !this.login.isDestroyed()) { showSchoolLoginWindow(this.login); return }
-    this.beginLogin(true)
+    const win = this.login
+    if (this.state.phase === 'manual-login-required') {
+      if (!win || win.isDestroyed() || (!this.watch && (win.webContents.isLoadingMainFrame() || !isAuthenticationOrigin(win.webContents.getURL())))) {
+        this.beginLogin(true, AMS_ENTRY, true)
+        return
+      }
+      this.manual = true
+      this.explicitWindow = true
+      this.authenticating = true
+      this.watch ??= setInterval(() => void this.tickAuthentication(), 700)
+      this.update({ message: SCHOOL_MANUAL_LOGIN_MESSAGE })
+    }
+    if (win && !win.isDestroyed()) showSchoolLoginWindow(win)
+    else this.beginLogin(true)
   }
 
   private async tickAuthentication(): Promise<void> {
@@ -145,9 +170,8 @@ export class AmsService implements AccountConsumer {
       const inspection: unknown = await win.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: buildLoginInspectionScript() }])
       if (generation !== this.generation || win.isDestroyed()) return
       if (inspection === 'verification-required') { this.attention(SCHOOL_VERIFICATION_MESSAGE); return }
-      if (this.state.phase === 'verification-required') return
-      if (inspection === 'login-error') { this.fail('学校登录未通过，请到首页核对保存的账号密码后重试。'); return }
-      if (inspection !== 'credentials' || !isCredentialPage(url) || this.submitted) return
+      if (inspection === 'login-error') { this.loginFailed('学校登录未通过。'); return }
+      if (this.manual || inspection !== 'credentials' || !isCredentialPage(url) || this.submitted) return
       const credentialGeneration = this.credentialGeneration
       let saved: Awaited<ReturnType<AccountService['read']>>
       try { saved = await this.account.read() } catch {
@@ -170,15 +194,14 @@ export class AmsService implements AccountConsumer {
       if (generation !== this.generation || credentialGeneration !== this.credentialGeneration || win.isDestroyed()) return
       if (result === 'submitted' || result === 'already-submitted') this.update({ message: '已自动提交登录，正在等待学校认证结果…' })
       else if (result === 'verification-required') this.attention(SCHOOL_VERIFICATION_MESSAGE)
-      else if (result !== 'cancelled' && result !== 'wrong-page') this.fail('登录表单未能自动提交，请检查首页账号设置，或打开官方页面处理。')
+      else if (result !== 'cancelled' && result !== 'wrong-page') this.loginFailed('学校登录表单未能自动提交。')
     } catch {
       // A successful login may navigate before executeJavaScript resolves. Do
       // not resubmit; keep watching for the AMS page or a verification step.
     } finally {
       this.tickPending = false
-      if (generation === this.generation && !win.isDestroyed() && this.authenticating && Date.now() > this.deadline && this.state.phase !== 'verification-required' && this.state.phase !== 'credentials-required') {
-        if (isAuthenticationOrigin(win.webContents.getURL())) this.attention('学校认证还未结束。请在官方窗口查看提示并继续登录。')
-        else this.fail('学校认证等待超时，请检查网络，或打开登录页查看状态。')
+      if (generation === this.generation && !win.isDestroyed() && this.authenticating && !this.manual && this.watch && Date.now() > this.deadline) {
+        this.loginFailed('学校认证等待超时。')
       }
     }
   }
@@ -205,8 +228,9 @@ export class AmsService implements AccountConsumer {
     this.generation++
     this.authenticating = false
     this.stopWatch()
-    this.login?.destroy()
+    const previous = this.login
     this.login = null
+    previous?.destroy()
     await this.school.clearStorageData({ origin: AMS_ORIGIN, storages: ['localstorage'] })
     this.beginLogin(false)
   }
@@ -227,6 +251,7 @@ export class AmsService implements AccountConsumer {
   }
 
   refresh(userInitiated = true): Promise<void> {
+    if (userInitiated && this.state.phase === 'manual-login-required') return Promise.resolve()
     if (!this.token) return this.openLogin()
     if (this.pending) return this.pending
     if (userInitiated) this.recoveries = 0
@@ -249,11 +274,12 @@ export class AmsService implements AccountConsumer {
     const authenticationFailure = [timetable, modules, terms].some((result) => result.status === 'rejected' && result.reason instanceof AmsError && result.reason.kind === 'auth')
     if (authenticationFailure) {
       this.token = ''
-      if (this.recoveries++ < 1) { await this.reconnect(false); return }
-      this.fail('学校会话未能建立，请核对首页账号设置后重试。')
+      if (!this.manual && this.recoveries++ < 1) { await this.reconnect(false); return }
+      this.loginFailed('学校会话未能建立。', false)
       return
     }
     const successful = timetable.status === 'fulfilled' || modules.status === 'fulfilled'
+    if (successful) this.manual = false
     this.update({
       phase: successful ? 'connected' : 'error',
       message: successful ? timetable.status === 'fulfilled' && modules.status === 'fulfilled' ? '已更新课程列表、签到率与近期课表。' : '部分信息已更新，请查看对应视图的提示。' : 'AMS 信息读取失败，请稍后重试。',
@@ -328,10 +354,13 @@ export class AmsService implements AccountConsumer {
   }
 
   async openSource(): Promise<void> {
-    if (this.state.phase === 'verification-required') return this.showLogin()
+    if (schoolLoginAction(this.state.phase)) return this.showLogin()
     this.beginLogin(true, AMS_SOURCE)
   }
-  async openModuleSource(): Promise<void> { this.beginLogin(true, AMS_MODULE_SOURCE) }
+  async openModuleSource(): Promise<void> {
+    if (schoolLoginAction(this.state.phase)) return this.showLogin()
+    this.beginLogin(true, AMS_MODULE_SOURCE)
+  }
 
   async clearSession(): Promise<void> {
     this.generation++

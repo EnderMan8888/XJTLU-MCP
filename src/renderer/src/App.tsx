@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { version } from '../../../package.json'
-import { initialState, type AmsState } from '../../shared/ams'
+import { initialState, schoolLoginAction, type AmsState } from '../../shared/ams'
 import type { CredentialStatus } from '../../shared/credentials'
 import { CredentialPanel } from './CredentialPanel'
 import { AmsPage } from './AmsPage'
@@ -51,6 +51,12 @@ export function App(): React.JSX.Element {
   }
   const navigate = (target: Page): void => { setError(''); setPage(target); pageScroll.current?.scrollTo(0, 0) }
   const modules = ams.moduleSnapshot
+  const schoolConnections = [
+    { page: 'ams', name: 'AMS', state: ams, showLogin: api?.ams.showLogin },
+    { page: 'ebridge', name: 'eBridge', state: ebridge, showLogin: api?.ebridge.showLogin },
+    { page: 'library', name: '图书馆', state: library.booking, showLogin: api?.library.showLogin },
+    { page: 'lmc', name: 'LMC', state: lmc, showLogin: api?.lmc.showLogin }
+  ] as const
 
   return <div className="shell">
     <aside className="sidebar">
@@ -58,18 +64,23 @@ export function App(): React.JSX.Element {
       <div className="nav-label">校园工作台</div>
       <nav aria-label="主要功能">{(['home', 'account', 'ams', 'ebridge','library', 'lmc', 'mcp'] as Page[]).map((item) => <button type="button" key={item} className={`nav-item ${page === item ? '' : 'nav-secondary'}`} aria-current={page === item ? 'page' : undefined} onClick={() => navigate(item)}><span>{item === 'home' ? '⌂' : item === 'account' ? '◈' : item === 'ebridge' ? '▤' : item==='library'?'▥':item==='mcp'?'↗':item==='lmc'?'▣':'▦'}</span>{labels[item]}{page === item && <span className="nav-dot" />}</button>)}</nav>
       <div className="sidebar-note"><span className="small-dot" /> 本机运行<div>学校账号统一管理，服务独立连接。</div></div>
-      <div className="version">XJTLU-MCP · v{version.replace(/\.0$/, '')}</div>
+      <div className="version">XJTLU-MCP · v{version}</div>
     </aside>
 
     <main>
       <header className="topbar"><span>校园工作台 <span className="separator">/</span><strong>{labels[page]}</strong></span></header>
       <div className="page-scroll" ref={pageScroll}>
       <div className="content">
-        {ams.phase === 'verification-required' && <div className="attention-banner" role="status"><div><strong>继续 AMS 学校认证</strong><p>{ams.message}</p></div><button className="primary" disabled={!api || action} onClick={() => void run(() => api.ams.showLogin())}>打开学校验证窗口</button></div>}
-        {ebridge.phase === 'verification-required' && <div className="attention-banner" role="status"><div><strong>继续 eBridge 学校认证</strong><p>{ebridge.message}</p></div><button className="primary" disabled={!api || action} onClick={() => void run(() => api.ebridge.showLogin())}>打开学校验证窗口</button></div>}
-        {library.booking.phase==='verification-required'&&<div className="attention-banner" role="status"><div><strong>继续图书馆学校认证</strong><p>{library.booking.message}</p></div><button className="primary" disabled={!api||action} onClick={()=>void run(()=>api.library.showLogin())}>打开学校验证窗口</button></div>}
+        {schoolConnections.map(({ page: modulePage, name, state, showLogin }) => {
+          const label = schoolLoginAction(state.phase)
+          const needsVerification = state.phase === 'verification-required'
+          if (!label || !needsVerification && page !== 'home') return null
+          return <div key={modulePage} className="attention-banner" role="status">
+            <div><strong>{name} {needsVerification ? '需要学校验证' : '需要手动登录'}</strong><p>{state.message}</p></div>
+            <button className="primary" disabled={!showLogin || action} onClick={() => { if (showLogin) void run(showLogin) }}>{needsVerification ? '打开学校验证窗口' : label}</button>
+          </div>
+        })}
         {page!=='library'&&library.agentBooking?.phase==='pending'&&<div className="attention-banner" role="status"><div><strong>Agent 请求图书馆预约</strong><p>请查看座位和时段，再决定是否提交。</p></div><button className="primary" onClick={()=>navigate('library')}>查看预约请求</button></div>}
-        {lmc.phase === 'verification-required' && <div className="attention-banner" role="status"><div><strong>继续 LMC 学校认证</strong><p>{lmc.message}</p></div><button className="primary" disabled={!api || action} onClick={() => void run(() => api.lmc.showLogin())}>打开学校验证窗口</button></div>}
         {error && <div className="notice error" role="alert">{error}</div>}
 
         {page === 'home' && <>
@@ -83,13 +94,13 @@ export function App(): React.JSX.Element {
             <button type="button" className="feature-card card" onClick={()=>navigate('library')}><span className="feature-icon library-icon">▥</span><span className={`feature-status ${library.booking.phase==='connected'?'green':''}`}>{library.booking.phase==='connected'?'已连接学校账号':'选座预约'}</span><h2>图书馆座位</h2><p>选择具体座位和时段，确认后提交图书馆预约。</p><span className="feature-link">{library.fetchedAt?`${library.floors.length} 个楼层 · 选座预约`:'进入图书馆'}<span>↗</span></span></button>
             <button type="button" className="feature-card card" onClick={() => navigate('lmc')}><span className="feature-icon lmc-icon">▣</span><span className={`feature-status ${lmc.phase === 'connected' ? 'green' : ''}`}>{phases[lmc.phase]}</span><h2>Learning Mall Core</h2><p>查看 Module 课程资料、下载原文件，并读取学校通知。</p><span className="feature-link">{lmc.coursesAt ? `${lmc.courses.length} 门课程 · ${lmc.unreadCount ?? '—'} 条未读通知` : '进入 Learning Mall'}<span>↗</span></span></button>
           </div>
-          <div className="home-footnote">已保存账号后，程序自动填入并提交登录；验证码或二次验证出现时再由你完成。</div>
+          <div className="home-footnote">保存账号后，程序会尝试自动登录。登录失败时可选择手动登录，学校要求验证时会打开官方窗口。</div>
         </>}
 
         {page === 'account' && <>
           <div className="heading"><div><div className="eyebrow">CAMPUS ACCOUNT</div><h1>账号与登录</h1><p>学校账号在这里统一管理，AMS 等服务按需使用。</p></div><div className="ams-icon">◈</div></div>
           <section className="card account-card"><div className="account-intro"><h2>学校统一认证账号</h2><p>账号密码使用 Windows 的加密能力保存在本机，供程序在学校官方页面自动登录。</p></div><CredentialPanel api={api?.account} disabled={false} onError={setError} /></section>
-          <div className="account-explanation"><h2>自动登录怎样工作</h2><ol><li>优先恢复仍有效的学校会话。</li><li>需要重新登录时，程序填写已保存的账号密码并点击学校的登录按钮。</li><li>遇到验证码、二次验证或页面确认时，打开官方窗口提醒你完成。</li></ol><p>可以随时更新或删除保存的信息。断开某个服务不会删除这里的学校账号。</p></div>
+          <div className="account-explanation"><h2>自动登录怎样工作</h2><ol><li>优先恢复仍有效的学校会话。</li><li>需要重新登录时，程序填写已保存的账号密码并点击学校的登录按钮。</li><li>自动登录失败后，可点击对应模块的「手动登录」继续。</li><li>遇到验证码、二次验证或页面确认时，打开官方窗口提醒你完成。</li></ol><p>可以随时更新或删除保存的信息。断开某个服务不会删除这里的学校账号。</p></div>
         </>}
 
         {page === 'ams' && <AmsPage state={ams} ebridge={ebridge} refresh={async()=>{await Promise.all([api.ams.refresh(),api.ebridge.refresh()])}} api={api?.ams} action={action} run={run} onAccount={() => navigate('account')} />}

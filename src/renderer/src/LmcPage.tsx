@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { schoolLoginAction } from '../../shared/ams'
 import { isSignInNotice, type LmcBridge, type LmcDownload, type LmcNotification, type LmcState } from '../../shared/lmc'
 import { phases, updatedAt } from './presentation'
 import { notificationContent } from './lmc-notifications'
@@ -12,6 +13,7 @@ const courseSortKey = 'xjtlu.lmc.courseSort'
 const courseNameOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'base' })
 
 export function LmcPage({ state, api, onAccount }: { state: LmcState; api: LmcBridge | undefined; onAccount: () => void }): React.JSX.Element {
+  const loginAction = schoolLoginAction(state.phase)
   const [view, setView] = useState<'courses' | 'notifications'>('courses')
   const [selected, setSelected] = useState('')
   const [search, setSearch] = useState('')
@@ -44,7 +46,7 @@ export function LmcPage({ state, api, onAccount }: { state: LmcState; api: LmcBr
   }
   return <>
     <div className="heading"><div><div className="eyebrow">LEARNING MALL CORE</div><h1>课程资料与通知</h1><p>查看 Module 内容，下载学校提供的原文件。</p></div><div className="ams-icon lmc-icon">LM</div></div>
-    <section className="connection card"><div className="connection-top"><div><span className={`status status-${state.phase}`}><span />{phases[state.phase]}</span><h2>LMC 连接</h2><p>{state.message}</p></div><div className="actions"><button disabled={disabled} onClick={() => { if (!api) return; if (state.phase === 'credentials-required') onAccount(); else void run(() => state.phase === 'verification-required' ? api.showLogin() : api.connect()) }}>{state.phase === 'credentials-required' ? '设置学校账号' : state.phase === 'verification-required' ? '完成验证' : connected ? '更新连接' : '连接 LMC'}</button><button className="primary" disabled={disabled || !connected} onClick={() => { if (api) void run(() => api.refresh()) }}>{connecting ? '正在读取…' : '刷新课程与通知'}</button></div></div><div className="connection-bottom"><span>◈ 复用首页学校账号</span><span>◈ 文件直接下载，不提取文档内容</span></div></section>
+    <section className="connection card"><div className="connection-top"><div><span className={`status status-${state.phase}`}><span />{phases[state.phase]}</span><h2>LMC 连接</h2><p>{state.message}</p></div><div className="actions"><button disabled={disabled} onClick={() => { if (!api) return; if (state.phase === 'credentials-required') onAccount(); else void run(() => loginAction ? api.showLogin() : api.connect()) }}>{loginAction ?? (state.phase === 'credentials-required' ? '设置学校账号' : connected ? '更新连接' : '连接 LMC')}</button><button className="primary" disabled={disabled || !connected} onClick={() => { if (api) void run(() => api.refresh()) }}>{connecting ? '正在读取…' : '刷新课程与通知'}</button></div></div><div className="connection-bottom"><span>◈ 复用首页学校账号</span><span>◈ 文件直接下载，不提取文档内容</span></div></section>
     {error && <div className="notice error" role="alert">{error}</div>}
     <div className="view-tabs" role="group" aria-label="Learning Mall 视图"><button className={view === 'courses' ? 'active' : ''} aria-pressed={view === 'courses'} onClick={() => setView('courses')}>课程与资料</button><button className={view === 'notifications' ? 'active' : ''} aria-pressed={view === 'notifications'} onClick={() => setView('notifications')}>Notification{state.unreadCount !== null ? ` · ${state.unreadCount} 条未读` : ''}</button></div>
     {view === 'courses' && <>

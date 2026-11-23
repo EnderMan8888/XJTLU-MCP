@@ -131,12 +131,25 @@ export async function saveWorkbuddyInstall(token: string): Promise<WorkbuddyInst
   return inspectWorkbuddyInstall(token)
 }
 
-export async function uninstallWorkbuddy(): Promise<void> {
+export async function uninstallWorkbuddy(): Promise<boolean> {
   const path = configPath()
   const result = await readConfig(path)
   if (result.kind === 'invalid') throw new Error('WorkBuddy 的 mcp.json 无法解析。')
-  if (result.kind !== 'ok' || !isCampusConnector(entryOf(result.value))) return
-  const servers = result.value.mcpServers as Record<string, unknown>
-  delete servers[serverName]
-  await writeAgentConfig(path, result.original, `${JSON.stringify(result.value, null, 2)}\n`)
+  const entry = result.kind === 'ok' ? entryOf(result.value) : null
+  if (entry && !isCampusConnector(entry)) return false
+  const approvals = await readAgentConfig(approvalsPath())
+  const trusted = approvals === undefined ? {} : parseConfig(approvals)
+  if (!trusted) throw new Error('WorkBuddy 的信任记录无法解析。')
+  if (result.kind === 'ok' && entry) {
+    const servers = result.value.mcpServers as Record<string, unknown>
+    delete servers[serverName]
+    await writeAgentConfig(path, result.original, `${JSON.stringify(result.value, null, 2)}\n`)
+  }
+  const key = approvalKey()
+  if (Object.hasOwn(trusted, key)) {
+    delete trusted[key]
+    await writeAgentConfig(approvalsPath(), approvals, `${JSON.stringify(trusted, null, 2)}\n`)
+    return true
+  }
+  return Boolean(entry)
 }

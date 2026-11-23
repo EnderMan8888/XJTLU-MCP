@@ -1,4 +1,5 @@
 import { app, BrowserWindow, clipboard, ipcMain, Menu, net, protocol, safeStorage, session, shell, Tray } from 'electron'
+import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { AmsService } from './ams-service'
@@ -14,6 +15,7 @@ import { amsRelativeDays } from '../shared/module-attendance'
 import { CampusQueries } from '../mcp/campus-queries'
 import { McpKeyStore } from '../infrastructure/mcp-key-store'
 import { McpService } from './mcp-service'
+import { agentDisplayPath } from './agent-display-path'
 import { codexPluginLink, inspectCodexAgent, installCodexAgent, uninstallCodexAgent } from './codex-plugin'
 import { inspectMimoAgent, saveMimoInstall, uninstallMimo } from './mimo-code'
 import { inspectWorkbuddyAgent, saveWorkbuddyInstall, uninstallWorkbuddy } from './workbuddy'
@@ -33,7 +35,11 @@ app.setPath('userData', smoke ? resolve('.scratch/smoke-profile') : join(app.get
 app.setName('XJTLU-MCP AMS')
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
-if (!app.requestSingleInstanceLock()) app.quit()
+const maintenanceQuit = '--quit-for-maintenance'
+const maintenanceCheck = '--check-for-maintenance'
+const singleInstance = app.requestSingleInstanceLock()
+if (process.argv.includes(maintenanceCheck)) app.exit(singleInstance ? 0 : 2)
+else if (!singleInstance || process.argv.includes(maintenanceQuit)) app.quit()
 else {
   let main: BrowserWindow | null = null
   let tray: Tray | null = null
@@ -137,6 +143,10 @@ else {
     }), app.getVersion(), state => { if (main && !main.isDestroyed()) main.webContents.send('mcp:state', state) })
     const agentClient = z.enum(AGENT_CLIENTS)
     const appData = app.getPath('appData')
+    const agentDisplayRoots = {
+      appPath: app.getAppPath(), appData,
+      localAppData: process.env.LOCALAPPDATA, userProfile: homedir()
+    }
     const version = app.getVersion()
     const codexCatalog = join(userData, 'agent-plugins', 'codex')
     const clients = {
@@ -156,7 +166,7 @@ else {
       workbuddy: {
         inspect: inspectWorkbuddyAgent,
         install: async (token: string) => { await saveWorkbuddyInstall(token) },
-        uninstall: uninstallWorkbuddy
+        uninstall: async () => { await uninstallWorkbuddy() }
       },
       mimo: {
         inspect: (token: string) => inspectMimoAgent(token, version),
@@ -182,7 +192,11 @@ else {
       'mcp:open-codex-plugin': async () => {
         await shell.openExternal(await codexPluginLink(codexCatalog, app.getAppPath()))
       },
-      'mcp:get-agent-install-status': (value: unknown) => mcp.inspectClient(clients[agentClient.parse(value)].inspect),
+      'mcp:get-agent-install-status': async (value: unknown) => {
+        const status = await mcp.inspectClient(clients[agentClient.parse(value)].inspect)
+        const locations = status.locations.map(({ label, path }) => ({ label, path: agentDisplayPath(path, agentDisplayRoots) }))
+        return { ...status, locations }
+      },
       'mcp:install-agent': (value: unknown) => mcp.pairClient(clients[agentClient.parse(value)].install),
       'mcp:uninstall-agent': (value: unknown) => mcp.uninstallClient(clients[agentClient.parse(value)].uninstall),
       'mcp:open-doubao-setup': async () => {
@@ -285,7 +299,10 @@ else {
     if (!smoke && process.argv.includes('--connect-library')) void library.connect().catch(() => console.error('Library connection failed.'))
   }).catch(() => { console.error('The desktop application could not start.'); app.quit() })
 
-  app.on('second-instance', showWorkbench)
+  app.on('second-instance', (_event, argv) => {
+    if (argv.includes(maintenanceQuit)) app.quit()
+    else if (!argv.includes(maintenanceCheck)) showWorkbench()
+  })
   app.on('window-all-closed', () => app.quit())
   app.on('before-quit', () => {
     if (quitting) return

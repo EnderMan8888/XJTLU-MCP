@@ -7,7 +7,7 @@ import type { CredentialStatus } from '../shared/credentials'
 import { initialLmcState, LMC_ORIGIN, type LmcAssignmentDates, type LmcDownload, type LmcFile, type LmcModule, type LmcNotification, type LmcNotificationRange, type LmcSource, type LmcState } from '../shared/lmc'
 import { cleanLmcAssignmentDates, lmcAcademicUrl, lmcAjaxScript, lmcAssignmentCardsScript, lmcAssignmentPageInspection, lmcCourseInspection, lmcDownloadAllowed, lmcFileInspection, lmcFileUrl, lmcId, lmcSchoolUrl, lmcText, parseLmcCourses, parseLmcNotifications, safeLmcFilename, type LmcFilesDocument, type LmcPageDocument } from '../providers/lmc'
 import { buildAutomaticLoginScript, buildLoginInspectionScript, isAuthenticationOrigin, isCredentialPage, SCHOOL_VERIFICATION_MESSAGE } from '../security/login-policy'
-import { isAbortedNavigation, showSchoolLoginWindow } from './school-login-window'
+import { isAbortedNavigation, schoolLoginFailure, SCHOOL_MANUAL_LOGIN_MESSAGE, showSchoolLoginWindow } from './school-login-window'
 
 interface Route { url: string; courseId: string; kind: 'resource' | 'folder' | 'activity' | 'file'; name: string }
 interface DownloadTicket { id: string; generation: number; win: BrowserWindow; expected: Set<string>; resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
@@ -24,6 +24,7 @@ export class LmcService implements AccountConsumer {
   private watch: ReturnType<typeof setInterval> | null = null
   private ticking = false
   private submitted = false
+  private manual = false
   private ssoClicked = false
   private deadline = 0
   private automatic: Promise<unknown> | null = null
@@ -52,11 +53,16 @@ export class LmcService implements AccountConsumer {
   private stopWatch(): void { if (this.watch) clearInterval(this.watch); this.watch = null }
   private attention(message: string): void {
     const first = this.state.phase !== 'verification-required'
-    this.submitted = true
+    this.manual = true
     if (first || this.state.message !== message) this.update({ phase: 'verification-required', message })
     if (first) showSchoolLoginWindow(this.win)
   }
   private fail(message: string): void { this.stopWatch(); this.update({ phase: 'error', message }) }
+  private loginFailed(message: string, keepWatching = this.manual): void {
+    if (!keepWatching) this.stopWatch()
+    const text = schoolLoginFailure(message, keepWatching)
+    if (this.state.phase !== 'manual-login-required' || this.state.message !== text) this.update({ phase: 'manual-login-required', message: text })
+  }
   private requireWindow(): BrowserWindow { if (!this.win || this.win.isDestroyed() || this.state.phase !== 'connected') throw new Error('请先连接 Learning Mall Core。'); return this.win }
   private queued(key: string, operation: (g: number, win: BrowserWindow) => Promise<void>): Promise<void> {
     const existing = this.pending.get(key)
@@ -71,39 +77,55 @@ export class LmcService implements AccountConsumer {
     return task
   }
   async connect(): Promise<void> {
+    if (this.state.phase === 'manual-login-required') return
     if (this.state.phase === 'verification-required' && this.win && !this.win.isDestroyed()) { await this.showLogin(); return }
     if (this.watch || this.pending.size) return
     if (this.state.phase === 'connected' && this.win && !this.win.isDestroyed()) return this.refresh()
+    this.startLogin(false)
+  }
+
+  private startLogin(manual: boolean): void {
+    if (this.disposed) return
     this.stopWatch(); this.generation++; this.credentialGeneration++
-    this.win?.destroy(); this.win = null
-    this.submitted = false; this.ssoClicked = false
+    const previous = this.win
+    this.win = null
+    previous?.destroy()
+    this.submitted = false; this.ssoClicked = false; this.manual = manual
     const g = this.generation
-    const win = new BrowserWindow({ title: 'Learning Mall Core · 学校原页', width: 1180, height: 840, show: false, autoHideMenuBar: true, webPreferences: { session: this.school, nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } })
+    const win = new BrowserWindow({ title: 'Learning Mall Core · 学校原页', width: 1180, height: 840, show: manual, autoHideMenuBar: true, webPreferences: { session: this.school, nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } })
     this.win = win
     win.webContents.setWindowOpenHandler(({ url }) => { if (lmcSchoolUrl(url)) void win.loadURL(url).catch(() => {}); return { action: 'deny' } })
     win.webContents.on('will-navigate', (event, url) => { if (!lmcSchoolUrl(url)) event.preventDefault() })
     win.webContents.on('will-redirect', (event, url) => { if (!lmcSchoolUrl(url)) event.preventDefault() })
-    win.on('closed', () => { if (this.win === win) { this.win = null; this.stopWatch(); this.cancelTicket(); if (!this.disposed) this.update({ phase: 'idle', message: 'LMC 学校窗口已关闭，可重新连接。' }) } })
+    win.on('closed', () => {
+      if (this.win !== win) return
+      this.win = null
+      this.stopWatch()
+      this.cancelTicket()
+      if (this.state.phase === 'manual-login-required') this.loginFailed('学校窗口已关闭。', false)
+      else this.update({ phase: 'idle', message: 'LMC 学校窗口已关闭，可重新连接。' })
+    })
     this.deadline = Date.now() + 75_000
-    this.update({ phase: 'authenticating', message: '正在连接 Learning Mall Core 和西浦统一认证…' })
+    this.update(manual ? { phase: 'manual-login-required', message: SCHOOL_MANUAL_LOGIN_MESSAGE }
+      : { phase: 'authenticating', message: '正在连接 Learning Mall Core 和西浦统一认证…' })
     const tick = (): void => { void this.tick(g, win) }
     this.watch = setInterval(tick, 750); win.webContents.on('did-finish-load', tick)
-    await win.loadURL(`${LMC_ORIGIN}/`).catch(error => {
-      if (!isAbortedNavigation(error) && this.valid(g, win) && this.watch && this.state.phase !== 'verification-required') this.fail('LMC 页面加载失败，请检查网络后重试。')
+    void win.loadURL(`${LMC_ORIGIN}/`).catch(error => {
+      if (!isAbortedNavigation(error) && this.valid(g, win) && this.watch && this.state.phase !== 'verification-required') this.loginFailed('LMC 页面加载失败，请检查网络。', false)
     })
   }
   private async tick(g: number, win: BrowserWindow): Promise<void> {
-    if (!this.valid(g, win) || !this.watch || this.ticking || win.webContents.isLoadingMainFrame()) return
+    if (!this.valid(g, win) || !this.watch || this.ticking) return
     this.ticking = true
     try {
+      if (win.webContents.isLoadingMainFrame()) return
       const url = win.webContents.getURL()
       if (isAuthenticationOrigin(url)) {
         const state = await win.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: buildLoginInspectionScript() }])
         if (!this.valid(g, win)) return
         if (state === 'verification-required') { this.attention(SCHOOL_VERIFICATION_MESSAGE); return }
-        if (this.state.phase === 'verification-required') return
-        if (state === 'login-error') { this.fail('学校登录未通过，请在首页核对账号后重试。'); return }
-        if (state !== 'credentials' || this.submitted || !isCredentialPage(url)) return
+        if (state === 'login-error') { this.loginFailed('学校登录未通过。'); return }
+        if (this.manual || state !== 'credentials' || this.submitted || !isCredentialPage(url)) return
         const cg = this.credentialGeneration
         const saved = await this.account.read().catch(() => null)
         if (!this.valid(g, win) || cg !== this.credentialGeneration || !isCredentialPage(win.webContents.getURL())) return
@@ -115,7 +137,7 @@ export class LmcService implements AccountConsumer {
         try { result = await task } finally { if (this.automatic === task) this.automatic = null }
         if (!this.valid(g, win) || cg !== this.credentialGeneration) return
         if (result === 'verification-required') this.attention(SCHOOL_VERIFICATION_MESSAGE)
-        else if (result !== 'submitted' && result !== 'already-submitted' && result !== 'cancelled' && result !== 'wrong-page') this.attention('请在 LMC 学校窗口完成登录确认。')
+        else if (result !== 'submitted' && result !== 'already-submitted' && result !== 'cancelled' && result !== 'wrong-page') this.loginFailed('学校登录表单未能自动提交。')
         return
       }
       if (!lmcAcademicUrl(url)) return
@@ -132,9 +154,8 @@ export class LmcService implements AccountConsumer {
     } catch { /* A successful SAML redirect can replace the old document. */ }
     finally {
       this.ticking = false
-      if (this.valid(g, win) && this.watch && this.state.phase !== 'verification-required' && Date.now() > this.deadline) {
-        if (isAuthenticationOrigin(win.webContents.getURL())) this.attention('学校认证还未结束。请在官方窗口查看提示并继续登录。')
-        else this.fail('LMC 登录等待超时，请打开学校窗口检查状态。')
+      if (this.valid(g, win) && this.watch && !this.manual && Date.now() > this.deadline) {
+        this.loginFailed('LMC 认证等待超时。')
       }
     }
   }
@@ -179,6 +200,7 @@ export class LmcService implements AccountConsumer {
     this.update({ phase: authFailed ? 'expired' : 'connected', message: authFailed ? 'LMC 会话已失效，请重新连接。' : this.state.issues.courses || this.state.issues.notifications ? '已连接 LMC，部分信息暂未更新，请查看页面提示。' : '课程和通知已更新，选择课程查看 Module 资料。' })
   }
   refresh(): Promise<void> {
+    if (this.state.phase === 'manual-login-required') return Promise.resolve()
     if (this.state.phase === 'verification-required') return this.showLogin()
     if (this.watch) return Promise.resolve()
     if (!this.win || this.win.isDestroyed() || this.state.phase !== 'connected') return this.connect()
@@ -390,7 +412,20 @@ export class LmcService implements AccountConsumer {
   }
   async cancelDownload(input: unknown): Promise<void> { const id = z.string().max(200).parse(input); if (this.ticket?.id === id) this.cancelTicket('下载已取消。', true); this.items.get(id)?.cancel() }
   async revealDownload(input: unknown): Promise<void> { const id = z.string().max(200).parse(input), path = this.saved.get(id); if (!path) throw new Error('文件尚未下载完成。'); shell.showItemInFolder(path) }
-  async showLogin(): Promise<void> { if (!this.win || this.win.isDestroyed()) await this.connect(); showSchoolLoginWindow(this.win) }
+  async showLogin(): Promise<void> {
+    if (this.state.phase === 'manual-login-required') {
+      const win = this.win
+      if (!win || win.isDestroyed() || (!this.watch && (win.webContents.isLoadingMainFrame() || !isAuthenticationOrigin(win.webContents.getURL())))) {
+        this.startLogin(true)
+        return
+      }
+      const g = this.generation
+      this.manual = true
+      this.watch ??= setInterval(() => void this.tick(g, win), 750)
+      this.update({ message: SCHOOL_MANUAL_LOGIN_MESSAGE })
+    } else if (!this.win || this.win.isDestroyed()) await this.connect()
+    showSchoolLoginWindow(this.win)
+  }
   openSource(source: LmcSource): Promise<void> {
     this.requireWindow()
     let url = `${LMC_ORIGIN}/my/`

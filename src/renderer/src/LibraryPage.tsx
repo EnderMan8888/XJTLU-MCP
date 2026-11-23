@@ -1,4 +1,5 @@
 import {useEffect,useState} from 'react'
+import {schoolLoginAction} from '../../shared/ams'
 import type {BookingDraft,LibraryBridge,LibraryBookingResult,LibraryReservation,LibraryState,SeatSearch} from '../../shared/library'
 import {phases,updatedAt} from './presentation'
 import {libraryNowWindow} from '../../shared/library-time'
@@ -29,6 +30,13 @@ export function LibraryPage({state,api,onAccount}:{state:LibraryState;api:Librar
   const seats=matching?floorSeats.filter(s=>(!onlyFree||s.available)&&s.name.toLowerCase().includes(seatFilter.toLowerCase())):[]
   const seat=matching?floorSeats.find(s=>s.id===seatId):undefined
   const ready=state.booking.phase==='connected'
+  const needsCredentials=state.booking.phase==='credentials-required'
+  const loginAction=schoolLoginAction(state.booking.phase)
+  const connectAccount=():void=>{
+    if(needsCredentials){onAccount();return}
+    void run(()=>loginAction?api.showLogin():api.connect())
+  }
+  const connectLabel=loginAction??(needsCredentials?'设置学校账号':ready?'重新连接':'连接学校账号')
   const loadRecords=():void=>{setView('records');void run(async()=>setRecords(await api.getReservations()))}
   const querySeats=():void=>{void run(async()=>{
     const window=automatic?libraryNowWindow():times
@@ -52,7 +60,19 @@ export function LibraryPage({state,api,onAccount}:{state:LibraryState;api:Librar
   const changeTime=(field:'date'|'start'|'end',value:string):void=>{setTimes(t=>({...t,[field]:value}));setSeatId(0)}
   return <>
     <div className="heading"><div><div className="eyebrow">LIBRARY · SEATS & RESERVATIONS</div><h1>找个座位，安排学习。</h1><p>选择楼层、具体座位、日期和时段，确认后提交预约。</p></div><div className="ams-icon">▥</div></div>
-    <section className="card connection"><div className="connection-top"><div><span className={`status status-${ready?'connected':state.booking.phase}`}><span />{phases[state.booking.phase]}</span><h2>图书馆学校账号</h2><p>{state.booking.message}</p></div><div className="actions"><button disabled={!api||busy||state.booking.phase==='authenticating'} onClick={()=>state.booking.phase==='credentials-required'?onAccount():void run(()=>state.booking.phase==='verification-required'?api.showLogin():api.connect())}>{state.booking.phase==='credentials-required'?'设置学校账号':state.booking.phase==='verification-required'?'完成验证':ready?'重新连接':'连接学校账号'}</button><button className="primary" disabled={!api||busy} onClick={()=>setView('booking')}>选座预约 ↗</button></div></div></section>
+    <section className="card connection">
+      <div className="connection-top">
+        <div>
+          <span className={`status status-${state.booking.phase}`}><span />{phases[state.booking.phase]}</span>
+          <h2>图书馆学校账号</h2>
+          <p>{state.booking.message}</p>
+        </div>
+        <div className="actions">
+          <button disabled={!api||busy||state.booking.phase==='authenticating'} onClick={connectAccount}>{connectLabel}</button>
+          <button className="primary" disabled={!api||busy} onClick={()=>setView('booking')}>选座预约 ↗</button>
+        </div>
+      </div>
+    </section>
     <div className="view-tabs" role="group" aria-label="图书馆功能"><button className={view==='booking'?'active':''} onClick={()=>setView('booking')}>选座预约</button><button className={view==='records'?'active':''} disabled={!ready||busy} onClick={loadRecords}>我的预约</button></div>
     {state.agentBooking?.phase==='pending'&&<div className="attention-banner" role="status"><div><strong>Agent 请求预约 {state.agentBooking.seat}</strong><p>{state.agentBooking.selection.date} · {state.agentBooking.selection.startMode==='now'?'现在起':state.agentBooking.selection.start}–{state.agentBooking.selection.end}</p></div><div className="actions"><button disabled={busy} onClick={()=>void run(()=>api.cancelAgentBooking(state.agentBooking!.id))}>拒绝</button><button className="primary" disabled={busy||!ready} onClick={()=>review(state.agentBooking!.id)}>核对预约</button></div></div>}
     {error&&<div className="notice error" role="alert">{error}</div>}
