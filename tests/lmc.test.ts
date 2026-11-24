@@ -1,7 +1,7 @@
 import { it } from 'node:test'
 import assert from 'node:assert/strict'
 import { runInNewContext } from 'node:vm'
-import { cleanLmcAssignmentDates, lmcAcademicUrl, lmcAjaxScript, lmcAssignmentCardsScript, lmcAssignmentPageInspection, lmcCourseInspection, lmcDownloadAllowed, lmcFileInspection, lmcFileUrl, lmcResourceUrl, lmcSchoolUrl, lmcText, parseLmcCourses, parseLmcNotifications, safeLmcFilename } from '../src/providers/lmc.ts'
+import { cleanLmcAssignmentDates, lmcAcademicUrl, lmcAjaxScript, lmcAssignmentCardsScript, lmcAssignmentPageInspection, lmcCourseInspection, lmcDownloadAllowed, lmcFileInspection, lmcFileUrl, lmcForumAttachmentsScript, lmcForumTarget, lmcResourceUrl, lmcSchoolUrl, lmcText, parseLmcCourses, parseLmcForumAttachments, parseLmcNotifications, safeLmcFilename } from '../src/providers/lmc.ts'
 import { LMC_ORIGIN } from '../src/shared/lmc.ts'
 
 const file = `${LMC_ORIGIN}/pluginfile.php/42/mod_resource/content/1/example.pdf`
@@ -84,6 +84,43 @@ it('LMC AJAX uses the current-user read method and keeps credentials inside the 
 it('LMC inspection scripts parse as JavaScript without adding any document-extraction endpoint', () => {
   assert.doesNotThrow(() => new Function(lmcCourseInspection))
   assert.doesNotThrow(() => new Function(lmcFileInspection))
+})
+
+it('LMC recognizes notice sources and reads files from the selected forum post only', async () => {
+  const discussion = `${LMC_ORIGIN}/mod/forum/discuss.php?d=5`
+  const source = `${discussion}#p23`
+  const notice = { id: 1, subject: 'Announcement', body: '', timecreated: 1_795_000_000, read: 0,
+    component: 'mod_forum', contexturl: discussion, forumLinks: [`${LMC_ORIGIN}/mod/forum/discuss.php?d=8#p30`, source] }
+  const { items: [item] } = parseLmcNotifications({ notifications: [notice], unreadcount: 1 })
+  assert.equal(item.privateUrl, source)
+  assert.equal(item.canListAttachments, true)
+  assert.equal(item.read, false)
+  assert.equal(lmcForumTarget(`${discussion}&action=delete`), null)
+
+  const rootFile = { url: `${LMC_ORIGIN}/pluginfile.php/4/mod_forum/attachment/12/root.pdf`, filename: 'root.pdf' }
+  const replyFile = { url: `${LMC_ORIGIN}/pluginfile.php/4/mod_forum/attachment/23/reply.pdf`, filename: 'reply.pdf' }
+  const inlineFile = { url: `${LMC_ORIGIN}/pluginfile.php/4/mod_forum/post/23/inline.png`, filename: 'inline.png' }
+  const posts = [
+    { id: 12, hasparent: false, attachments: [rootFile] },
+    { id: 23, hasparent: true, attachments: [replyFile, { url: 'https://example.invalid/file.pdf', filename: 'external.pdf' }], messageinlinefiles: [inlineFile] }
+  ]
+  const methods: unknown[] = []
+  async function files(url: string) {
+    const response = await runInNewContext(lmcForumAttachmentsScript(lmcForumTarget(url)!), {
+      location: { origin: LMC_ORIGIN }, M: { cfg: { sesskey: 'fictional' } }, URL, AbortSignal,
+      fetch: async (_url: URL, options: RequestInit) => {
+        methods.push(JSON.parse(String(options.body))[0])
+        return { ok: true, text: async () => JSON.stringify([{ error: false, data: { posts } }]) }
+      }
+    })
+    assert.equal(response.ok, true)
+    return parseLmcForumAttachments(response.data)
+  }
+  const replies = await files(source)
+  assert.deepEqual(replies.map(file => file.name), ['reply.pdf', 'inline.png'])
+  assert.deepEqual((await files(discussion)).map(file => file.name), ['root.pdf'])
+  assert.ok(lmcDownloadAllowed(new Set([replies[0].url]), [replies[0].url], LMC_ORIGIN))
+  assert.deepEqual(methods, Array(2).fill({ index: 0, methodname: 'mod_forum_get_discussion_posts', args: { discussionid: 5, includeinlineattachments: true } }))
 })
 
 it('LMC asks Core for last-access order and preserves that order across a course page', async () => {

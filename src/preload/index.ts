@@ -19,7 +19,10 @@ const bridge: CampusBridge = { settings: {
   loadCourse: id => ipcRenderer.invoke('lmc:load-course', id),
   loadFolder: id => ipcRenderer.invoke('lmc:load-folder', id),
   loadNotifications: more => ipcRenderer.invoke('lmc:notifications', more),
-  download: id => ipcRenderer.invoke('lmc:download', id),
+  loadNotificationAttachments: notificationId => ipcRenderer.invoke('lmc:notification-attachments', notificationId),
+  download: (id, notificationId) => notificationId
+    ? ipcRenderer.invoke('lmc:download-attachment', { id, notificationId })
+    : ipcRenderer.invoke('lmc:download', id),
   cancelDownload: id => ipcRenderer.invoke('lmc:cancel-download', id),
   revealDownload: id => ipcRenderer.invoke('lmc:reveal-download', id),
   openSource: source => ipcRenderer.invoke('lmc:open-source', source),

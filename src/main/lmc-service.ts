@@ -1,16 +1,18 @@
 import { app, BrowserWindow, session, shell, type DownloadItem, type WebContents } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { z } from 'zod'
 import type { AccountConsumer, AccountService } from '../services/account-service'
 import type { CredentialStatus } from '../shared/credentials'
-import { initialLmcState, LMC_ORIGIN, type LmcAssignmentDates, type LmcDownload, type LmcFile, type LmcModule, type LmcNotification, type LmcNotificationRange, type LmcSource, type LmcState } from '../shared/lmc'
-import { cleanLmcAssignmentDates, lmcAcademicUrl, lmcAjaxScript, lmcAssignmentCardsScript, lmcAssignmentPageInspection, lmcCourseInspection, lmcDownloadAllowed, lmcFileInspection, lmcFileUrl, lmcId, lmcSchoolUrl, lmcText, parseLmcCourses, parseLmcNotifications, safeLmcFilename, type LmcFilesDocument, type LmcPageDocument } from '../providers/lmc'
+import { initialLmcState, LMC_ORIGIN, type LmcAssignmentDates, type LmcDownload, type LmcFile, type LmcModule, type LmcNotification, type LmcNotificationAttachment, type LmcNotificationRange, type LmcSource, type LmcState } from '../shared/lmc'
+import { cleanLmcAssignmentDates, lmcAcademicUrl, lmcAjaxScript, lmcAssignmentCardsScript, lmcAssignmentPageInspection, lmcCourseInspection, lmcDownloadAllowed, lmcFileInspection, lmcFileUrl, lmcForumAttachmentsScript, lmcForumTarget, lmcId, lmcSchoolUrl, lmcText, parseLmcCourses, parseLmcForumAttachments, parseLmcNotifications, safeLmcFilename, type LmcFilesDocument, type LmcPageDocument } from '../providers/lmc'
+import { LmcSavePathError, prepareLmcSavePath, type LmcSaveTarget } from '../infrastructure/lmc-save-path'
 import { buildAutomaticLoginScript, buildLoginInspectionScript, isAuthenticationOrigin, isCredentialPage, SCHOOL_VERIFICATION_MESSAGE } from '../security/login-policy'
 import { isAbortedNavigation, schoolLoginFailure, SCHOOL_MANUAL_LOGIN_MESSAGE, showSchoolLoginWindow } from './school-login-window'
 
 interface Route { url: string; courseId: string; kind: 'resource' | 'folder' | 'activity' | 'file'; name: string }
-interface DownloadTicket { id: string; generation: number; win: BrowserWindow; expected: Set<string>; resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
+interface NotificationRoute { url: string; files?: Map<string, { url: string; name: string }> }
+interface DownloadTicket { id: string; generation: number; win: BrowserWindow; expected: Set<string>; destination?: LmcSaveTarget; resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
 class LmcAuthError extends Error {}
 class LmcCancelledDownload extends Error {}
 
@@ -31,7 +33,7 @@ export class LmcService implements AccountConsumer {
   private tail: Promise<unknown> = Promise.resolve()
   private pending = new Map<string, Promise<void>>()
   private routes = new Map<string, Route>()
-  private notificationRoutes = new Map<string, string>()
+  private notificationRoutes = new Map<string, NotificationRoute>()
   private notificationOffset = 0
   private notificationReads = new Map<number, Promise<LmcNotificationRange>>()
   private startingDownload: object | null = null
@@ -168,9 +170,12 @@ export class LmcService implements AccountConsumer {
   private async portal(g: number, win: BrowserWindow): Promise<void> {
     if (!lmcAcademicUrl(win.webContents.getURL()) || !await win.webContents.executeJavaScript(`location.origin===${JSON.stringify(LMC_ORIGIN)}&&!!globalThis.M?.cfg?.sesskey`)) await this.navigate(g, win, `${LMC_ORIGIN}/my/`)
   }
-  private async ajax(g: number, win: BrowserWindow, kind: 'courses' | 'notifications', offset: number): Promise<unknown> {
+  private ajax(g: number, win: BrowserWindow, kind: 'courses' | 'notifications', offset: number): Promise<unknown> {
+    return this.readAjax(g, win, lmcAjaxScript(kind, offset))
+  }
+  private async readAjax(g: number, win: BrowserWindow, script: string): Promise<unknown> {
     if (!this.valid(g, win)) throw new Error('Cancelled')
-    const result = await win.webContents.executeJavaScript(lmcAjaxScript(kind, offset))
+    const result = await win.webContents.executeJavaScript(script)
     if (!this.valid(g, win)) throw new Error('Cancelled')
     if (!result?.ok) { if (result?.reason === 'auth') throw new LmcAuthError(); throw new Error('LMC response unavailable') }
     return result.data
@@ -287,6 +292,38 @@ export class LmcService implements AccountConsumer {
       } catch (error) { if (this.valid(g, win)) this.folderState(route.courseId, id, { loading: false, issue: '文件夹未能读取，请重试或打开学校原页。' }); throw error }
     })
   }
+  private attachmentList(route: NotificationRoute): LmcNotificationAttachment[] | undefined {
+    return route.files && [...route.files].map(([fileId, { name }]) => ({ fileId, name }))
+  }
+  private rememberNotification({ privateUrl, ...item }: LmcNotification & { privateUrl: string | null }): LmcNotification {
+    if (!privateUrl) {
+      this.notificationRoutes.delete(item.id)
+      return item
+    }
+    const previous = this.notificationRoutes.get(item.id)
+    const route = previous?.url === privateUrl ? previous : { url: privateUrl }
+    this.notificationRoutes.delete(item.id)
+    this.notificationRoutes.set(item.id, route)
+    if (this.notificationRoutes.size > 5000) this.notificationRoutes.delete(this.notificationRoutes.keys().next().value!)
+    const attachments = this.attachmentList(route)
+    return attachments ? { ...item, attachments } : item
+  }
+  async loadNotificationAttachments(input: unknown): Promise<LmcNotificationAttachment[] | null> {
+    const id = z.string().min(1).max(200).parse(input)
+    const route = this.notificationRoutes.get(id)
+    const target = lmcForumTarget(route?.url ?? null)
+    if (!route || !target) return null
+    if (route.files) return this.attachmentList(route)!
+    await this.queued(`notification-attachments:${id}`, async (g, win) => {
+      await this.portal(g, win)
+      const files = parseLmcForumAttachments(await this.readAjax(g, win, lmcForumAttachmentsScript(target)))
+      if (!this.valid(g, win) || this.notificationRoutes.get(id) !== route) return
+      route.files = new Map(files.map(file => [`attachment:${randomUUID()}`, file]))
+      const attachments = this.attachmentList(route)!
+      this.update({ notifications: this.state.notifications.map(item => item.id === id ? { ...item, attachments } : item) })
+    })
+    return this.attachmentList(route) ?? null
+  }
   private async readNotifications(g: number, win: BrowserWindow, more: boolean): Promise<void> {
     this.update({ notificationsLoading: true })
     try {
@@ -294,8 +331,7 @@ export class LmcService implements AccountConsumer {
       const offset = more ? this.notificationOffset : 0
       const result = parseLmcNotifications(await this.ajax(g, win, 'notifications', offset))
       if (!this.valid(g, win)) return
-      if (!more) this.notificationRoutes.clear()
-      const items = result.items.map(({ privateUrl, ...item }) => { if (privateUrl) this.notificationRoutes.set(item.id, privateUrl); return item })
+      const items = result.items.map(item => this.rememberNotification(item))
       const merged = new Map((more ? this.state.notifications : []).map(item => [item.id, item]))
       for (const item of items) merged.set(item.id, item)
       this.notificationOffset = offset + items.length
@@ -320,11 +356,11 @@ export class LmcService implements AccountConsumer {
         const page = parseLmcNotifications(await this.ajax(g, win, 'notifications', offset)).items
         if (!this.valid(g, win)) return
         fetchedAt = new Date().toISOString()
-        for (const { privateUrl: _privateUrl, ...item } of page) {
+        for (const item of page) {
           const time = item.createdAt ? Date.parse(item.createdAt) : NaN
           ordered &&= Number.isFinite(time) && time <= previousTime
           previousTime = time
-          if (!Number.isFinite(time) || time >= since) items.set(item.id, item)
+          if (!Number.isFinite(time) || time >= since) items.set(item.id, this.rememberNotification(item))
         }
         if (page.length < 20 || ordered && previousTime < since) { complete = true; break }
       }
@@ -341,22 +377,33 @@ export class LmcService implements AccountConsumer {
     if (!ticket) return
     this.ticket = null; clearTimeout(ticket.timer); this.downloadState(ticket.id, { phase: cancelled ? 'cancelled' : 'error', message }); ticket.reject(cancelled ? new LmcCancelledDownload(message) : new Error(message))
   }
-  async download(input: unknown): Promise<void> { await this.startDownload(input) }
-  async startDownload(input: unknown): Promise<string | null> {
-    this.requireWindow(); const { id, route } = this.route(input)
+  async download(input: unknown, notificationId?: string): Promise<void> { await this.startDownload(input, undefined, notificationId) }
+  private downloadRoute(input: unknown, notificationId?: string) {
+    if (notificationId === undefined) return this.route(input)
+    const id = z.string().max(200).parse(input)
+    const file = this.notificationRoutes.get(notificationId)?.files?.get(id)
+    if (!file) throw new Error('附件入口已更新，请重新读取公告附件。')
+    return { id, route: { ...file, kind: 'file' as const } }
+  }
+  async startDownload(input: unknown, savePath?: string, notificationId?: string): Promise<string | null> {
+    const win = this.requireWindow(), generation = this.generation
+    const { id, route } = this.downloadRoute(input, notificationId)
     if (route.kind !== 'resource' && route.kind !== 'file') throw new Error('请展开文件夹后选择文件下载。')
     if (this.startingDownload || this.ticket || this.items.size) throw new Error('请等待当前下载完成或取消后再下载。')
     const start = {}
     this.startingDownload = start
     let startedId: string | null = null
+    let destination: LmcSaveTarget | undefined
     try {
+      if (savePath !== undefined) destination = await prepareLmcSavePath(savePath, app.getPath('temp'))
+      if (!this.valid(generation, win)) return null
       await this.queued('download', async (g, win) => {
         if (this.ticket || this.items.size) throw new Error('A download is already active')
-        const current = this.route(id).route
+        const current = this.downloadRoute(id, notificationId).route
         const downloadId = randomUUID()
         this.update({ downloads: [{ id: downloadId, name: current.name, phase: 'preparing' as const, received: 0, total: 0, message: '正在取得学校文件…' }, ...this.state.downloads].slice(0, 20) })
         const started = new Promise<void>((resolve, reject) => {
-          this.ticket = { id: downloadId, generation: g, win, expected: new Set([current.url]), resolve, reject,
+          this.ticket = { id: downloadId, generation: g, win, expected: new Set([current.url]), destination, resolve, reject,
             timer: setTimeout(() => this.cancelTicket('未能取得下载文件，请重试或打开学校原页。'), 30_000) }
         })
         const ticket = this.ticket!
@@ -380,7 +427,10 @@ export class LmcService implements AccountConsumer {
         startedId = ticket.id
       })
       return startedId
-    } finally { if (this.startingDownload === start) this.startingDownload = null }
+    } finally {
+      if (!startedId) await destination?.cleanup()
+      if (this.startingDownload === start) this.startingDownload = null
+    }
   }
   private onDownload = (event: Electron.Event, item: DownloadItem, contents: WebContents): void => {
     const ticket = this.ticket
@@ -391,11 +441,19 @@ export class LmcService implements AccountConsumer {
       if (ticket) this.cancelTicket('下载来源未通过校验，请重新打开课程资料。')
       return
     }
+    const destination = ticket.destination
+    const name = destination ? basename(destination.target) : safeLmcFilename(item.getFilename())
+    try {
+      if (destination) item.setSavePath(destination.stagingPath)
+      else item.setSaveDialogOptions({ title: '保存 Learning Mall 资料', defaultPath: join(app.getPath('downloads'), name), properties: ['showOverwriteConfirmation', 'createDirectory'] })
+    } catch {
+      event.preventDefault()
+      this.cancelTicket('未能设置文件保存位置。')
+      return
+    }
     this.ticket = null; clearTimeout(ticket.timer)
-    const name = safeLmcFilename(item.getFilename())
-    item.setSaveDialogOptions({ title: '保存 Learning Mall 资料', defaultPath: join(app.getPath('downloads'), name), properties: ['showOverwriteConfirmation', 'createDirectory'] })
     this.items.set(ticket.id, item)
-    this.downloadState(ticket.id, { name, phase: 'downloading', total: item.getTotalBytes(), message: '请选择保存位置，正在下载…' })
+    this.downloadState(ticket.id, { name, phase: 'downloading', total: item.getTotalBytes(), message: destination ? '正在下载…' : '请选择保存位置，正在下载…' })
     ticket.resolve()
     let lastUpdate = 0
     item.on('updated', (_event, state) => {
@@ -405,10 +463,22 @@ export class LmcService implements AccountConsumer {
     })
     item.once('done', (_event, state) => {
       this.items.delete(ticket.id)
-      if (this.disposed || ticket.generation !== this.generation) return
-      if (state === 'completed') this.saved.set(ticket.id, item.getSavePath())
-      this.downloadState(ticket.id, { received: item.getReceivedBytes(), total: item.getTotalBytes(), phase: state === 'completed' ? 'completed' : state === 'cancelled' ? 'cancelled' : 'error', message: state === 'completed' ? '下载完成。' : state === 'cancelled' ? '下载已取消。' : '下载中断，请重新下载。' })
+      void this.finishDownload(ticket, state, item.getSavePath(), item.getReceivedBytes(), item.getTotalBytes())
     })
+  }
+  private async finishDownload(ticket: DownloadTicket, state: 'completed' | 'cancelled' | 'interrupted', path: string, received: number, total: number): Promise<void> {
+    const destination = ticket.destination
+    let phase: LmcDownload['phase'] = state === 'interrupted' ? 'error' : state
+    let message = state === 'completed' ? '下载完成。' : state === 'cancelled' ? '下载已取消。' : '下载中断，请重新下载。'
+    try {
+      if (state === 'completed' && !this.disposed && ticket.generation === this.generation) await destination?.save()
+    } catch (error) {
+      phase = 'error'
+      message = error instanceof LmcSavePathError ? error.message : '未能保存下载文件。'
+    } finally { await destination?.cleanup() }
+    if (this.disposed || ticket.generation !== this.generation) return
+    if (phase === 'completed') this.saved.set(ticket.id, destination?.target ?? path)
+    this.downloadState(ticket.id, { received, total, phase, message })
   }
   async cancelDownload(input: unknown): Promise<void> { const id = z.string().max(200).parse(input); if (this.ticket?.id === id) this.cancelTicket('下载已取消。', true); this.items.get(id)?.cancel() }
   async revealDownload(input: unknown): Promise<void> { const id = z.string().max(200).parse(input), path = this.saved.get(id); if (!path) throw new Error('文件尚未下载完成。'); shell.showItemInFolder(path) }
@@ -436,7 +506,7 @@ export class LmcService implements AccountConsumer {
       url = route.url
       if (url.startsWith(`${LMC_ORIGIN}/mod/assign/view.php?id=`)) assignment = { id, courseId: route.courseId }
     }
-    else if (source.kind === 'notification') { const target = this.notificationRoutes.get(source.id); if (!target) throw new Error('这条通知未提供可打开的原文入口。'); url = target }
+    else if (source.kind === 'notification') { const target = this.notificationRoutes.get(source.id); if (!target) throw new Error('这条通知未提供可打开的原文入口。'); url = target.url }
     return this.queued('open-source', async (g, win) => {
       await this.navigate(g, win, url)
       if (!this.valid(g, win)) return

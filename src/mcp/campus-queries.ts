@@ -2,13 +2,14 @@ import type { AmsState, ConnectionPhase } from '../shared/ams.ts'
 import type { EbridgeState } from '../shared/ebridge.ts'
 import type { AgentBooking, LibraryReservation, LibrarySeat, LibraryState, SeatSearch, SeatSelection } from '../shared/library.ts'
 import type { ModuleAttendanceSnapshot } from '../shared/modules.ts'
-import { isSignInNotice, type LmcNotificationRange, type LmcState } from '../shared/lmc.ts'
+import { isSignInNotice, type LmcNotificationAttachment, type LmcNotificationRange, type LmcState } from '../shared/lmc.ts'
 import { academicTermOn, beijingDate } from '../shared/academic-calendar.ts'
 import { libraryNowWindow } from '../shared/library-time.ts'
 import { LibraryError } from '../providers/library.ts'
 import { ebridgeTimetableForDate } from '../shared/ebridge-timetable.ts'
 import { amsRelativeDays, matchModuleAttendance, moduleAttendanceLabels } from '../shared/module-attendance.ts'
 import type { AutoRelogin } from '../services/auto-relogin.ts'
+import { LmcSavePathError } from '../infrastructure/lmc-save-path.ts'
 
 export interface CampusSources {
   ams: { getState(): AmsState; refresh(userInitiated?: boolean, recover?: boolean): Promise<void>; loadScheduleAttendance(date: string, ebridge: EbridgeState): Promise<void> }
@@ -26,13 +27,15 @@ export interface CampusSources {
     loadCourse(id: string): Promise<void>
     loadFolder(id: string): Promise<void>
     readNotificationRange(since: number): Promise<LmcNotificationRange>
-    startDownload(id: string): Promise<string | null>
+    loadNotificationAttachments?(id: string): Promise<LmcNotificationAttachment[] | null>
+    startDownload(id: string, savePath?: string, notificationId?: string): Promise<string | null>
   }
 }
 export type CampusSource = keyof CampusSources
 export interface SeatWindowInput { floorId: number; date?: string; start?: string; end?: string }
 export type ReserveSeatInput = { requestId: string } | (SeatWindowInput & ({ seatId: number } | { seatNumber: string }) & { title?: string; memo?: string })
-export type LmcDownloadInput = { downloadId: string } | { courseId: string; fileId: string } | { courseId: string; fileName: string; folderId?: string; path?: string }
+type LmcCourseDownload = { courseId: string; savePath?: string } & ({ fileId: string } | { fileName: string; folderId?: string; path?: string })
+export type LmcDownloadInput = { downloadId: string } | LmcCourseDownload | { notificationId: string; fileId: string; savePath?: string }
 export interface QueryResult {
   ok: boolean
   code: string | null
@@ -453,9 +456,20 @@ export class CampusQueries {
     })
   }
 
-  getLmcNotification(input: { from?: string; to?: string; includeSignIn?: boolean }): Promise<QueryResult> {
+  getLmcNotification(input: { from?: string; to?: string; includeSignIn?: boolean; notificationId?: string }): Promise<QueryResult> {
     return this.guarded(async () => {
       const source = 'Learning Mall Core Notifications', service = this.sources.lmc
+      if (input.notificationId) {
+        const { notificationId } = input
+        if (!service?.loadNotificationAttachments) return this.unavailable(source, 'idle', 'LMC 公告附件暂不可用。')
+        let attachments: LmcNotificationAttachment[] | null | undefined
+        try { attachments = await this.readLive('lmc', () => service.loadNotificationAttachments!(notificationId)) }
+        catch { return this.unavailable(source, service.getState().phase, '公告附件未能读取，请检查 LMC 连接或打开学校原文。', 'attachment_read_failed') }
+        const phase = service.getState().phase
+        if (attachments === undefined) return this.loginNeeded(source, phase, '请先在桌面应用连接 Learning Mall Core。')
+        if (attachments === null) return this.unavailable(source, phase, '请先读取带附件入口的 LMC 通知。', 'notification_not_found')
+        return this.result(source, phase, new Date(this.now()).toISOString(), null, { notificationId, attachments })
+      }
       const today = beijingDate(this.now()), oldest = subtractMonths(today, 4)
       const from = input.from ?? oldest, to = input.to ?? today
       if (!validDate(from) || !validDate(to) || from < oldest || from > to || to > today) {
@@ -542,28 +556,37 @@ export class CampusQueries {
       if ('downloadId' in input) downloadId = input.downloadId
       else {
         if (state.phase !== 'connected' && state.phase !== 'expired') return this.loginNeeded(source, state.phase, '请先在桌面应用连接 Learning Mall Core。')
-        const module = state.modules[input.courseId]
-        if (!this.usable(state.coursesAt) || !state.courses.some(course => course.id === input.courseId) || !this.usable(module?.fetchedAt)) {
-          return this.unavailable(source, state.phase, '请先读取该课程目录。', 'course_not_found')
+        let fileId: string
+        if ('notificationId' in input) fileId = input.fileId
+        else {
+          const module = state.modules[input.courseId]
+          if (!this.usable(state.coursesAt) || !state.courses.some(course => course.id === input.courseId) || !this.usable(module?.fetchedAt)) {
+            return this.unavailable(source, state.phase, '请先读取该课程目录。', 'course_not_found')
+          }
+          const resources = module.activities.filter(item => item.downloadable)
+          const folders = Object.values(module.folders).filter(folder => this.usable(folder.fetchedAt))
+          let matches: string[]
+          if ('fileId' in input) {
+            matches = [...resources, ...folders.flatMap(folder => folder.files)].filter(item => item.id === input.fileId).map(item => item.id)
+          } else if (input.folderId) {
+            const folder = module.folders[input.folderId]
+            const { fileName, path } = input
+            matches = this.usable(folder?.fetchedAt)
+              ? folder.files.filter(file => file.name === fileName && (!path || file.path === path)).map(file => file.id)
+              : []
+          } else {
+            matches = resources.filter(item => item.title === input.fileName && (!input.path || item.section === input.path)).map(item => item.id)
+          }
+          if (matches.length !== 1) return this.unavailable(source, state.phase, '请打开课程目录或文件夹，使用返回的 fileId 唯一定位文件。', matches.length ? 'ambiguous_file' : 'file_not_found')
+          fileId = matches[0]
         }
-        const resources = module.activities.filter(item => item.downloadable)
-        const folders = Object.values(module.folders).filter(folder => this.usable(folder.fetchedAt))
-        let matches: string[]
-        if ('fileId' in input) {
-          matches = [...resources, ...folders.flatMap(folder => folder.files)].filter(item => item.id === input.fileId).map(item => item.id)
-        } else if (input.folderId) {
-          const folder = module.folders[input.folderId]
-          const { fileName, path } = input
-          matches = this.usable(folder?.fetchedAt)
-            ? folder.files.filter(file => file.name === fileName && (!path || file.path === path)).map(file => file.id)
-            : []
-        } else {
-          matches = resources.filter(item => item.title === input.fileName && (!input.path || item.section === input.path)).map(item => item.id)
-        }
-        if (matches.length !== 1) return this.unavailable(source, state.phase, '请打开课程目录或文件夹，使用返回的 fileId 唯一定位文件。', matches.length ? 'ambiguous_file' : 'file_not_found')
         if (state.phase !== 'connected' && !await this.relogin?.ensureConnected('lmc')) return this.loginNeeded(source, this.phase('lmc'), '请先在桌面应用连接 Learning Mall Core。')
-        try { downloadId = await service.startDownload(matches[0]) }
-        catch { return this.unavailable(source, service.getState().phase, '未能开始下载，请检查 LMC 连接和桌面应用的下载状态。', 'download_failed') }
+        try { downloadId = await service.startDownload(fileId, input.savePath, 'notificationId' in input ? input.notificationId : undefined) }
+        catch (error) {
+          const phase = service.getState().phase
+          if (error instanceof LmcSavePathError) return this.unavailable(source, phase, error.message, error.code)
+          return this.unavailable(source, phase, '未能开始下载，请检查 LMC 连接、文件入口和桌面应用的下载状态。', 'download_failed')
+        }
         if (!downloadId) return this.unavailable(source, service.getState().phase, '下载在开始前已取消。', 'cancelled')
       }
       const download = service.getState().downloads.find(item => item.id === downloadId)

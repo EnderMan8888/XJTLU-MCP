@@ -19,6 +19,7 @@ const seatWindow = {
 }
 const courseId = z.string().regex(/^[1-9]\d{0,11}$/).describe('由 list_lmc_modules 返回的 courseId。')
 const fileId = z.string().min(1).max(200)
+const notificationId = z.string().min(1).max(200).describe('由 get_lmc_notification 返回的通知 ID。')
 const output = (result: QueryResult) => ({ content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: { ...result }, isError: !result.ok })
 
 export function createCampusMcp(queries: CampusQueries, version: string): McpServer {
@@ -49,8 +50,9 @@ export function createCampusMcp(queries: CampusQueries, version: string): McpSer
   )))
   server.registerTool('get_library_reservations', { description: '查询当前账号指定日期的图书馆预约和学校状态，默认北京时间今天。', inputSchema: z.object({ date }).strict(), annotations }, async input => output(await queries.getLibraryReservations(input)))
   server.registerTool('get_lmc_notification', {
-    description: '读取指定日期范围内的 LMC 通知。日期 YYYY-MM-DD，含首尾，最多回溯四个自然月。默认隐藏账号登录提醒。',
-    inputSchema: z.object({ from: z.iso.date().optional(), to: z.iso.date().optional(), includeSignIn: z.boolean().optional() }).strict(),
+    description: '读取指定日期范围内的 LMC 通知。日期 YYYY-MM-DD，含首尾，最多回溯四个自然月。默认隐藏账号登录提醒。canListAttachments 为 true 时，仅传该通知的 notificationId（通知的 id）可读取公告附件和 fileId。',
+    inputSchema: z.object({ from: z.iso.date().optional(), to: z.iso.date().optional(), includeSignIn: z.boolean().optional(), notificationId: notificationId.optional() })
+      .strict().refine(input => !input.notificationId || Object.keys(input).length === 1, '读取附件时请仅传 notificationId。'),
     annotations
   }, async input => output(await queries.getLmcNotification(input)))
   server.registerTool('list_lmc_modules', { description: '获取 Learning Mall Core 当前可见的课程列表及 courseId，保持学校最近访问顺序。', inputSchema: z.object({ refresh }).strict(), annotations }, async input => output(await queries.listLmcModules(input)))
@@ -59,16 +61,24 @@ export function createCampusMcp(queries: CampusQueries, version: string): McpSer
     inputSchema: z.object({ courseId, folderId: fileId.optional(), refresh }).strict(), annotations
   }, async input => output(await queries.getModuleContents(input)))
   server.registerTool('download_lmc_file', {
-    description: '提供 courseId 和目录返回的 fileId，或提供 fileName、可选 folderId 和 path（文件相对路径或资源所在章节）。在桌面选择保存位置。仅传 downloadId 查询进度；downloaded 为 true 代表已经保存成功。',
+    description: '课程资料用 courseId 和 fileId，或用 courseId、fileName、可选 folderId 和 path（课程内相对路径或章节）。公告附件用 notificationId 和 fileId。仅在用户指定本机保存位置时传 savePath（含文件名的绝对路径），省略时由用户在桌面选择。仅传 downloadId 查询进度；downloaded 为 true 表示已保存。',
     inputSchema: z.object({ courseId: courseId.optional(), fileId: fileId.optional(), downloadId: z.uuid().optional(),
-      fileName: z.string().min(1).max(1000).optional(), folderId: fileId.optional(), path: z.string().min(1).max(1000).optional()
-    }).strict().refine(input => input.downloadId ? Object.keys(input).length === 1
-      : !!input.courseId && (input.fileId ? !input.fileName && !input.folderId && !input.path : !!input.fileName),
+      fileName: z.string().min(1).max(1000).optional(), folderId: fileId.optional(), path: z.string().min(1).max(1000).optional(),
+      notificationId: notificationId.optional(),
+      savePath: z.string().min(1).max(1024).describe('用户指定的本机绝对文件路径（含文件名）。父目录须存在，目标不可已存在。').optional()
+    }).strict().refine(input => {
+      if (input.downloadId) return Object.keys(input).length === 1
+      if (input.notificationId) return !!input.fileId && !input.courseId && !input.fileName && !input.folderId && !input.path
+      return !!input.courseId && (input.fileId ? !input.fileName && !input.folderId && !input.path : !!input.fileName)
+    },
     '请通过文件 ID 或文件名定位，或仅传 downloadId。'),
     annotations: action
-  }, async ({ downloadId, courseId, fileId, fileName, folderId, path }) => output(await queries.downloadLmcFile(
-    downloadId ? { downloadId } : fileId ? { courseId: courseId!, fileId } : { courseId: courseId!, fileName: fileName!, folderId, path }
-  )))
+  }, async ({ downloadId, courseId, fileId, fileName, folderId, path, notificationId, savePath }) => {
+    if (downloadId) return output(await queries.downloadLmcFile({ downloadId }))
+    if (notificationId) return output(await queries.downloadLmcFile({ notificationId, fileId: fileId!, savePath }))
+    const file = fileId ? { fileId } : { fileName: fileName!, folderId, path }
+    return output(await queries.downloadLmcFile({ courseId: courseId!, ...file, savePath }))
+  })
   return server
 }
 

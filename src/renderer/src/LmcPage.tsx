@@ -83,7 +83,16 @@ export function LmcPage({ state, api, autoRelogin, onAccount }: { state: LmcStat
       <div className="section-heading"><div><h2>通知</h2><span>当前显示 {notices.length} 条</span></div><button disabled={disabled || !canRead || state.notificationsLoading} onClick={() => { if (api) void run(() => api.loadNotifications(false)) }}>刷新通知</button></div>
       <div className="lmc-notification-filters"><label title="New sign in to your Learning Mall Core account"><input type="checkbox" checked={hideSignIn} onChange={event => { const checked = event.target.checked; setHideSignIn(checked); try { localStorage.setItem(signInFilterKey, String(checked)) } catch { /* The current page still keeps the selected filter. */ } }} />隐藏账号登录提醒</label><span>{hideSignIn ? `已隐藏 ${hiddenNotices} 条 · ` : ''}未读总数沿用学校统计</span></div>
       <section className="card lmc-notifications">
-        {!state.notificationsAt ? <div className="empty"><h3>等待 LMC 通知</h3><p>连接后读取学校通知。</p></div> : !state.notifications.length ? <div className="empty"><h3>学校当前没有返回通知</h3></div> : !notices.length ? <div className="empty"><h3>当前已加载的通知均已隐藏</h3><p>可取消隐藏账号登录提醒，或加载更多通知。</p></div> : notices.map(item => <NotificationCard key={item.id} item={item} expanded={expandedNotices.has(item.id)} disabled={disabled || !connected} onToggle={() => { const next = new Set(expandedNotices); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); setExpandedNotices(next) }} onSource={() => { if (api) void run(() => api.openSource({ kind: 'notification', id: item.id })) }} />)}
+        {!state.notificationsAt ? <div className="empty"><h3>等待 LMC 通知</h3><p>连接后读取学校通知。</p></div> : !state.notifications.length ? <div className="empty"><h3>学校当前没有返回通知</h3></div> : !notices.length ? <div className="empty"><h3>当前已加载的通知均已隐藏</h3><p>可取消隐藏账号登录提醒，或加载更多通知。</p></div> : notices.map(item => <NotificationCard
+          key={item.id} item={item} expanded={expandedNotices.has(item.id)} disabled={disabled || !connected}
+          attachmentsDisabled={disabled || !canRead} downloadBusy={downloadBusy}
+          onToggle={() => { const next = new Set(expandedNotices); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); setExpandedNotices(next) }}
+          onSource={() => { if (api) void run(() => api.openSource({ kind: 'notification', id: item.id })) }}
+          onAttachments={() => { if (api) void run(async () => {
+            if (!await api.loadNotificationAttachments(item.id)) throw new Error('附件入口暂不可用。')
+          }) }}
+          onDownload={fileId => { if (api) void run(() => api.download(fileId, item.id)) }}
+        />)}
         <div className="schedule-footer"><span>上次更新：{updatedAt(state.notificationsAt)}</span>{state.moreNotifications && <button disabled={disabled || !canRead || state.notificationsLoading} onClick={() => { if (api) void run(() => api.loadNotifications(true)) }}>加载更多</button>}</div>
       </section>
     </>}
@@ -93,13 +102,31 @@ export function LmcPage({ state, api, autoRelogin, onAccount }: { state: LmcStat
   </>
 }
 
-function NotificationCard({ item, expanded, disabled, onToggle, onSource }: { item: LmcNotification; expanded: boolean; disabled: boolean; onToggle: () => void; onSource: () => void }): React.JSX.Element {
+function NotificationCard({ item, expanded, disabled, attachmentsDisabled, downloadBusy, onToggle, onSource, onAttachments, onDownload }: {
+  item: LmcNotification
+  expanded: boolean
+  disabled: boolean
+  attachmentsDisabled: boolean
+  downloadBusy: boolean
+  onToggle: () => void
+  onSource: () => void
+  onAttachments: () => void
+  onDownload: (fileId: string) => void
+}): React.JSX.Element {
   const content = notificationContent(item)
   return <article className={`lmc-notification${item.read === false ? ' is-unread' : ''}`}>
     <div className="lmc-notification-title"><h3>{content.title}</h3><span className={item.read === false ? 'lmc-unread' : 'lmc-read'}>{item.read === null ? '状态未知' : item.read ? '已读' : '未读'}</span></div>
     <div className="lmc-notification-meta">{content.course && <span className="lmc-notification-course">{content.course}</span>}<span>{sourceLabels[item.source] ?? '学校通知'}</span>{content.author && <span>{content.author}</span>}<time dateTime={item.createdAt ?? undefined}>{updatedAt(item.createdAt)}</time></div>
     {expanded ? <div className="lmc-notification-body">{content.body.split(/\n\n+/).map((paragraph, index) => <p key={index}>{paragraph}</p>)}</div> : <p className="lmc-notification-preview">{content.preview || '这条通知未提供正文。'}</p>}
-    {(content.canExpand || item.hasSource) && <div className="lmc-notification-actions">{content.canExpand && <button className="text-button" aria-expanded={expanded} onClick={onToggle}>{expanded ? '收起详情 ↑' : '展开详情 ↓'}</button>}{item.hasSource && <button className="text-button" disabled={disabled} onClick={onSource}>学校原文 ↗</button>}</div>}
+    {item.attachments?.map(file => <div className="lmc-file" key={file.fileId}>
+      <strong>{file.name}</strong><button disabled={attachmentsDisabled || downloadBusy} onClick={() => onDownload(file.fileId)}>下载</button>
+    </div>)}
+    {item.attachments?.length === 0 && <p className="lmc-notification-preview">学校未提供附件。</p>}
+    {(content.canExpand || item.hasSource) && <div className="lmc-notification-actions">
+      {content.canExpand && <button className="text-button" aria-expanded={expanded} onClick={onToggle}>{expanded ? '收起详情 ↑' : '展开详情 ↓'}</button>}
+      {item.canListAttachments && !item.attachments && <button className="text-button" disabled={attachmentsDisabled} onClick={onAttachments}>查看附件</button>}
+      {item.hasSource && <button className="text-button" disabled={disabled} onClick={onSource}>学校原文 ↗</button>}
+    </div>}
   </article>
 }
 

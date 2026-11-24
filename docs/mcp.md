@@ -49,10 +49,10 @@ http_headers = { Authorization = "Bearer <从应用复制的访问密钥>" }
 | `get_library_seats` | `floorId`、`date?`、`start?`、`end?` | 当前登录账号可查询的楼层座位、`seatId`、座位号、可预约状态和开放时段 |
 | `reserve_library_seat` | `floorId`、`seatId` 或 `seatNumber`、`date?`、`start?`、`end?`、`title?`、`memo?`；或仅传 `requestId` | 发起需用户确认的预约，或查询现有请求的状态和学校确认结果 |
 | `get_library_reservations` | `date?` | 当前账号在该日期的预约，默认今天 |
-| `get_lmc_notification` | `from?`、`to?`（年月日），`includeSignIn?` | 日期范围内的通知、正文、时间和已读状态 |
+| `get_lmc_notification` | `from?`、`to?`（年月日）、`includeSignIn?`；或仅传 `notificationId` | 查询通知，或列出一则公告的附件和 `fileId` |
 | `list_lmc_modules` | `refresh?` | 当前可见课程的 `courseId`、课程名和简称，保持 Core 最近访问顺序 |
 | `get_module_contents` | `courseId`、`folderId?`、`refresh?` | 课程章节、活动类型和已读取到的作业时间 `assignmentDates`。指定文件夹时返回文件名、相对路径和 `fileId` |
-| `download_lmc_file` | `courseId` 和 `fileId`，或 `courseId`、`fileName`、`folderId?`、`path?`；或仅传 `downloadId` | 请求保存 LMC 原文件，或查询下载进度和结果 |
+| `download_lmc_file` | 课程资料传 `courseId` 和 `fileId`，或按 `fileName`、`folderId?`、`path?` 定位；公告附件传 `notificationId` 和 `fileId`。发起下载时可传 `savePath?`；查进度时仅传 `downloadId` | 保存 LMC 原文件，或查询下载进度和结果 |
 
 调用示例：
 
@@ -80,7 +80,15 @@ http_headers = { Authorization = "Bearer <从应用复制的访问密钥>" }
 
 `get_module_contents` 的作业可包含 `assignmentDates.opens` 和 `assignmentDates.due`，保留学校显示的日期及时间文本。单项未读取到时为 `null`，两项都未读取到时省略 `assignmentDates`。
 
-下载前先调用 `list_lmc_modules` 和 `get_module_contents` 定位课程及文件。按名称定位时，文件夹内的 `path` 是文件相对路径，目录中的独立资源则用所在章节。桌面选择保存位置后，用 `downloadId` 查询进度，完成时 `downloaded` 为 true。文件内容、学校下载链接及本机保存路径均保留在桌面端。
+课程资料先用 `list_lmc_modules` 和 `get_module_contents` 定位。按名称定位时，`path` 表示课程内的文件相对路径或资源所在章节。通知返回 `canListAttachments: true` 时，把通知的 `id` 作为 `notificationId` 单独传给 `get_lmc_notification`，即可读取附件名称和 `fileId`。
+
+如用户已指定保存位置，发起下载时可传 `savePath`。它是运行工作台的电脑上的绝对文件路径，含文件名，且父目录已存在。目标文件已存在时返回错误。省略 `savePath` 会打开桌面的保存窗口。
+
+```json
+{"name":"download_lmc_file","arguments":{"notificationId":"123:1795000000:mod_forum","fileId":"attachment:示例","savePath":"D:/Downloads/公告附件.pdf"}}
+```
+
+发起下载后用返回的 `downloadId` 查询进度。仅当 `downloaded` 为 true 时表示文件已经保存。状态查询只返回文件名、进度和结果。
 
 ## 结果语义
 

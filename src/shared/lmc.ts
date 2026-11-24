@@ -7,7 +7,8 @@ export interface LmcActivity { id: string; title: string; section: string; type:
 export interface LmcFile { id: string; name: string; path: string; extension: string }
 export interface LmcFolder { files: LmcFile[]; fetchedAt: string | null; loading: boolean; issue: string | null }
 export interface LmcModule { courseId: string; activities: LmcActivity[]; folders: Record<string, LmcFolder>; fetchedAt: string | null; loading: boolean; issue: string | null }
-export interface LmcNotification { id: string; title: string; body: string; createdAt: string | null; read: boolean | null; source: string; hasSource: boolean }
+export interface LmcNotificationAttachment { fileId: string; name: string }
+export interface LmcNotification { id: string; title: string; body: string; createdAt: string | null; read: boolean | null; source: string; hasSource: boolean; canListAttachments?: boolean; attachments?: LmcNotificationAttachment[] }
 export interface LmcNotificationRange { notifications: LmcNotification[]; fetchedAt: string | null; complete: boolean; issue: string | null }
 export function isSignInNotice(title: string): boolean {
   return title.trim().replace(/\s+/g, ' ').toLowerCase() === 'new sign in to your learning mall core account'
@@ -38,7 +39,8 @@ export interface LmcBridge {
   loadCourse(id: string): Promise<void>
   loadFolder(id: string): Promise<void>
   loadNotifications(more: boolean): Promise<void>
-  download(id: string): Promise<void>
+  loadNotificationAttachments(notificationId: string): Promise<LmcNotificationAttachment[] | null>
+  download(id: string, notificationId?: string): Promise<void>
   cancelDownload(id: string): Promise<void>
   revealDownload(id: string): Promise<void>
   openSource(source: LmcSource): Promise<void>

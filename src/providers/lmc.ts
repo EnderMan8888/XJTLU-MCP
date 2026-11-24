@@ -5,13 +5,19 @@ import { LMC_ORIGIN, type LmcAssignmentDates, type LmcCourse, type LmcNotificati
 export const lmcId = z.string().regex(/^[1-9]\d{0,11}$/)
 export function lmcSchoolUrl(raw: string): boolean { try { const u = new URL(raw); return isAuthenticationOrigin(raw) || (u.origin === LMC_ORIGIN && !u.username && !u.password) } catch { return false } }
 export function lmcAcademicUrl(raw: string): boolean { try { return lmcSchoolUrl(raw) && new URL(raw).origin === LMC_ORIGIN } catch { return false } }
+const forumFilePath = /^\/[1-9]\d*\/mod_forum\/(?:attachment|post)\/[1-9]\d*\/.+/
+function lmcPluginFilePath(url: URL): string | null {
+  if (url.pathname === '/pluginfile.php') return url.searchParams.get('file')
+  return url.pathname.startsWith('/pluginfile.php/') && !url.searchParams.has('file')
+    ? decodeURIComponent(url.pathname.slice('/pluginfile.php'.length)) : null
+}
 export function lmcFileUrl(raw: string): boolean {
   if (!lmcAcademicUrl(raw)) return false
   try {
     const u = new URL(raw)
     if ([...u.searchParams.keys()].some(key => !['file', 'forcedownload'].includes(key))) return false
-    const path = u.pathname === '/pluginfile.php' ? u.searchParams.get('file') : u.pathname.startsWith('/pluginfile.php/') ? decodeURIComponent(u.pathname.slice('/pluginfile.php'.length)) : null
-    return !!path && /^\/[1-9]\d*\/mod_(?:resource|folder)\/content\/[^/]+\/.+/.test(path) && !path.split('/').some(part => part === '..' || part === '.') && !/[\u0000-\u001f\\]/.test(path) && !/%(?:2e|2f|5c)/i.test(path)
+    const path = lmcPluginFilePath(u)
+    return !!path && (forumFilePath.test(path) || /^\/[1-9]\d*\/mod_(?:resource|folder)\/content\/[^/]+\/.+/.test(path)) && !path.split('/').some(part => part === '..' || part === '.') && !/[\u0000-\u001f\\]/.test(path) && !/%(?:2e|2f|5c)/i.test(path)
   } catch { return false }
 }
 export function lmcResourceUrl(raw: string): boolean { try { const u = new URL(raw); return lmcAcademicUrl(raw) && ['/mod/resource/view.php', '/mod/folder/view.php'].includes(u.pathname) && lmcId.safeParse(u.searchParams.get('id')).success && [...u.searchParams.keys()].every(key => key === 'id' || key === 'forceview') } catch { return false } }
@@ -27,13 +33,31 @@ export function parseLmcCourses(input: unknown): LmcCourse[] {
   const data = z.object({ courses: z.array(courseSchema).max(50) }).parse(input)
   return data.courses.map(course => ({ id: course.id, title: lmcText(course.fullname, 500), shortName: lmcText(course.shortname ?? '', 300) }))
 }
+export function lmcForumTarget(raw: string | null): { discussionId: string; postId: string | null } | null {
+  if (!raw || !lmcAcademicUrl(raw)) return null
+  const url = new URL(raw)
+  if (url.pathname !== '/mod/forum/discuss.php' || ![...url.searchParams.keys()].every(key => key === 'd' || key === 'parent')) return null
+  const discussionId = url.searchParams.get('d')
+  if (!discussionId || !lmcId.safeParse(discussionId).success) return null
+  const postId = url.hash.match(/^#p([1-9]\d{0,11})$/)?.[1] ?? url.searchParams.get('parent')
+  if (postId && !lmcId.safeParse(postId).success) return null
+  return { discussionId, postId }
+}
+
 export function parseLmcNotifications(input: unknown): { items: (LmcNotification & { privateUrl: string | null })[]; unreadCount: number } {
-  const data = z.object({ notifications: z.array(z.object({ id: z.union([z.string(), z.number()]), subject: z.string(), body: z.string(), timecreated: z.number().nonnegative(), read: z.union([z.boolean(), z.literal(0), z.literal(1)]), component: z.string().nullish(), contexturl: z.string().nullish() })).max(20), unreadcount: z.number().int().nonnegative() }).parse(input)
+  const data = z.object({ notifications: z.array(z.object({ id: z.union([z.string(), z.number()]), subject: z.string(), body: z.string(), timecreated: z.number().nonnegative(), read: z.union([z.boolean(), z.literal(0), z.literal(1)]), component: z.string().nullish(), contexturl: z.string().nullish(), forumLinks: z.array(z.string().max(2000)).max(10).optional() })).max(20), unreadcount: z.number().int().nonnegative() }).parse(input)
   return { unreadCount: data.unreadcount, items: data.notifications.map(item => {
     const url = item.contexturl && lmcAcademicUrl(item.contexturl) ? new URL(item.contexturl) : null
     // Opening a notification may only navigate to observed read-only school pages.
-    const privateUrl = url && /^\/(?:course\/view\.php|mod\/[a-z0-9_]+\/(?:view|discuss)\.php|my\/|calendar\/view\.php|grade\/report\/[a-z]+\/index\.php)$/.test(url.pathname) && ![...url.searchParams.keys()].some(key => /sesskey|token|delete|action|submit/i.test(key)) ? url.href : null
-    return { id: `${item.id}:${item.timecreated}:${item.component ?? ''}`, title: lmcText(item.subject, 1000), body: lmcText(item.body), createdAt: Number.isFinite(new Date(item.timecreated * 1000).getTime()) ? new Date(item.timecreated * 1000).toISOString() : null, read: !!item.read, source: lmcText(item.component ?? '', 100), hasSource: !!privateUrl, privateUrl }
+    const context = url && /^\/(?:course\/view\.php|mod\/[a-z0-9_]+\/(?:view|discuss)\.php|my\/|calendar\/view\.php|grade\/report\/[a-z]+\/index\.php)$/.test(url.pathname) && ![...url.searchParams.keys()].some(key => /sesskey|token|delete|action|submit/i.test(key)) ? url.href : null
+    const target = lmcForumTarget(context)
+    const linkedPost = item.forumLinks?.find(link => {
+      const candidate = lmcForumTarget(link)
+      return candidate?.postId && (!target || candidate.discussionId === target.discussionId)
+    })
+    const discussion = item.component !== 'mod_forum' ? null : target?.postId ? context : linkedPost ?? (target ? context : null)
+    const privateUrl = discussion ?? context
+    return { id: `${item.id}:${item.timecreated}:${item.component ?? ''}`, title: lmcText(item.subject, 1000), body: lmcText(item.body), createdAt: Number.isFinite(new Date(item.timecreated * 1000).getTime()) ? new Date(item.timecreated * 1000).toISOString() : null, read: !!item.read, source: lmcText(item.component ?? '', 100), hasSource: !!privateUrl, privateUrl, ...(discussion && { canListAttachments: true }) }
   }) }
 }
 
@@ -41,18 +65,60 @@ export function parseLmcNotifications(input: unknown): { items: (LmcNotification
 export function lmcAjaxScript(kind: 'courses' | 'notifications', offset = 0): string {
   const method = kind === 'courses' ? 'core_course_get_enrolled_courses_by_timeline_classification' : 'message_popup_get_popup_notifications'
   const args = kind === 'courses' ? { classification: 'all', limit: 50, offset, sort: 'ul.timeaccess desc' } : { useridto: 0, newestfirst: true, limit: 20, offset }
+  return lmcAjaxRequest(method, args, kind === 'courses'
+    ? `return {ok:true,data:{courses:Array.isArray(data?.courses)?data.courses.map(c=>({id:c.id,fullname:plain(c.fullname),shortname:plain(c.shortname)})):null}};`
+    : `return {ok:true,data:{notifications:Array.isArray(data?.notifications)?data.notifications.map(n=>{
+      const body=html(n.fullmessagehtml||n.fullmessage||n.text||n.smallmessage);
+      const forumLinks=[];
+      if(n.component==='mod_forum')for(const a of body.querySelectorAll('a[href]')){
+        try{const u=new URL(a.getAttribute('href'),location.origin);if(u.origin===location.origin&&u.pathname==='/mod/forum/discuss.php'&&u.href.length<=2000)forumLinks.push(u.href)}catch{}
+        if(forumLinks.length>=10)break;
+      }
+      return {id:n.id,subject:plain(n.subject),body:body.body.textContent||'',timecreated:n.timecreated,read:n.read,component:n.component,contexturl:n.contexturl,forumLinks};
+    }):null,unreadcount:data?.unreadcount}};`)
+}
+
+export function lmcForumAttachmentsScript({ discussionId, postId }: NonNullable<ReturnType<typeof lmcForumTarget>>): string {
+  const args = { discussionid: Number(lmcId.parse(discussionId)), includeinlineattachments: true }
+  return lmcAjaxRequest('mod_forum_get_discussion_posts', args, `
+    const posts=Array.isArray(data?.posts)?data.posts:[];
+    const post=posts.find(p=>${postId ? `String(p.id)===${JSON.stringify(lmcId.parse(postId))}` : 'p.hasparent===false || p.parentid===0'});
+    if(!post||post.isdeleted||post.capabilities?.view===false||!Array.isArray(post.attachments))return {ok:false,reason:'format'};
+    const files=[...post.attachments,...(Array.isArray(post.messageinlinefiles)?post.messageinlinefiles:[])].filter(f=>!f.isdir);
+    return {ok:true,data:files.map(f=>({url:f.url,name:f.filename}))};
+  `)
+}
+
+export function parseLmcForumAttachments(input: unknown): { url: string; name: string }[] {
+  const rows = z.array(z.unknown()).max(200).parse(input)
+  const file = z.object({ url: z.string().max(4000), name: z.string().min(1).max(1000) })
+  const result = new Map<string, string>()
+  for (const row of rows) {
+    const parsed = file.safeParse(row)
+    if (!parsed.success || !lmcFileUrl(parsed.data.url)) continue
+    const url = new URL(parsed.data.url)
+    const path = lmcPluginFilePath(url)
+    if (!path || !forumFilePath.test(path)) continue
+    url.hash = ''
+    url.searchParams.set('forcedownload', '1')
+    result.set(url.href, safeLmcFilename(lmcText(parsed.data.name, 180)))
+  }
+  return [...result].map(([url, name]) => ({ url, name }))
+}
+
+function lmcAjaxRequest(method: string, args: object, readResult: string): string {
   return `(async () => {
     if (location.origin !== ${JSON.stringify(LMC_ORIGIN)} || !globalThis.M?.cfg?.sesskey) return {ok:false,reason:'auth'};
-    const plain=value=>{const doc=new DOMParser().parseFromString(String(value||''),'text/html');doc.querySelectorAll('script,style').forEach(el=>el.remove());return doc.body.textContent||''};
+    const html=value=>{const doc=new DOMParser().parseFromString(String(value||''),'text/html');doc.querySelectorAll('script,style').forEach(el=>el.remove());return doc};
+    const plain=value=>html(value).body.textContent||'';
     try {
       const url=new URL('/lib/ajax/service.php',location.origin);url.searchParams.set('sesskey',M.cfg.sesskey);url.searchParams.set('info',${JSON.stringify(method)});
-      const response=await fetch(url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify([{index:0,methodname:${JSON.stringify(method)},args:${JSON.stringify(args)}}]),signal:AbortSignal.timeout(20000)});
-      if(!response.ok)return {ok:false,reason:response.status===401||response.status===403?'auth':'request'};
+      const response=await fetch(url,{method:'POST',credentials:'same-origin',redirect:'manual',headers:{'Content-Type':'application/json'},body:JSON.stringify([{index:0,methodname:${JSON.stringify(method)},args:${JSON.stringify(args)}}]),signal:AbortSignal.timeout(20000)});
+      if(!response.ok)return {ok:false,reason:response.type==='opaqueredirect'||response.status===401||response.status===403?'auth':'request'};
       const text=await response.text();if(text.length>4000000)return {ok:false,reason:'format'};
       const payload=JSON.parse(text);if(!Array.isArray(payload)||payload[0]?.error){const code=payload?.[0]?.exception?.errorcode||'';return {ok:false,reason:/invalidsesskey|requirelogin|notloggedin/.test(code)?'auth':'request'}};
       const data=payload[0]?.data;
-      if(${JSON.stringify(kind)}==='courses')return {ok:true,data:{courses:Array.isArray(data?.courses)?data.courses.map(c=>({id:c.id,fullname:plain(c.fullname),shortname:plain(c.shortname)})):null}};
-      return {ok:true,data:{notifications:Array.isArray(data?.notifications)?data.notifications.map(n=>({id:n.id,subject:plain(n.subject),body:plain(n.fullmessagehtml||n.fullmessage||n.text||n.smallmessage),timecreated:n.timecreated,read:n.read,component:n.component,contexturl:n.contexturl})):null,unreadcount:data?.unreadcount}};
+      ${readResult}
     }catch{return {ok:false,reason:'request'}}
   })()`
 }

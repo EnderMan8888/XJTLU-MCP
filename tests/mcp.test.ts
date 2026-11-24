@@ -363,11 +363,29 @@ it('authenticates and calls all sixteen workbook tools through the official clie
   assert.equal(moduleContents.data.activities[0].folderId, f.folderId)
   assert.deepEqual(moduleContents.data.activities[1].assignmentDates, { opens: null, due: '16 November 2026, 11:55 PM' })
   assert.equal((await call('get_module_contents', { courseId: '1', folderId: f.folderId })).data.files[0].fileId, f.fileId)
+  const requests: unknown[][] = []
+  const startDownload = f.sources.lmc!.startDownload
+  f.sources.lmc!.startDownload = async (id, savePath, notificationId) => {
+    requests.push([id, savePath, notificationId])
+    return startDownload(id)
+  }
   const download = await call('download_lmc_file', { courseId: '1', folderId: f.folderId, fileName: 'Example.pdf', path: 'Reading/Example.pdf' })
   assert.equal(download.complete, false)
   assert.equal(download.data.downloaded, null)
+  assert.deepEqual(requests[0], [f.fileId, undefined, undefined])
   f.lmc.downloads[0].phase = 'completed'
   assert.equal((await call('download_lmc_file', { downloadId: f.downloadId })).data.downloaded, true)
+  const savePath = 'C:/Downloads/Example.pdf'
+  assert.equal((await call('download_lmc_file', { courseId: '1', fileId: f.fileId, savePath })).data.downloadId, f.downloadId)
+  assert.deepEqual(requests[1], [f.fileId, savePath, undefined])
+  const notificationId = notices.data.notifications[0].id
+  f.sources.lmc!.loadNotificationAttachments = async id => id === notificationId ? [{ fileId: 'attachment:demo', name: 'Notes.pdf' }] : null
+  const attachments = await call('get_lmc_notification', { notificationId })
+  assert.deepEqual(attachments.data.attachments, [{ fileId: 'attachment:demo', name: 'Notes.pdf' }])
+  assert.equal((await call('download_lmc_file', { notificationId, fileId: 'attachment:demo', savePath })).data.downloadId, f.downloadId)
+  assert.deepEqual(requests[2], ['attachment:demo', savePath, notificationId])
+  assert.equal((await client.callTool({ name: 'download_lmc_file', arguments: { downloadId: f.downloadId, savePath } })).isError, true)
+  assert.equal((await client.callTool({ name: 'download_lmc_file', arguments: { notificationId, courseId: '1', fileId: f.fileId } })).isError, true)
   const invalid = await client.callTool({ name: 'get_attendance_records', arguments: { date: '2026-11-14' } })
   assert.equal(invalid.isError, true)
   assert.equal((invalid.structuredContent as Record<string, unknown>)?.code, 'unsupported_date')

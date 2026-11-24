@@ -220,9 +220,15 @@ else {
         const more = z.boolean().parse(value)
         return readSchool('lmc', () => lmc.loadNotifications(more))
       },
+      'lmc:notification-attachments': (notificationId: unknown) => readSchool('lmc', () => lmc.loadNotificationAttachments(notificationId)),
       'lmc:download': async (id: unknown) => {
         if (!await relogin.ensureConnected('lmc')) return requireConnection('lmc')
         return lmc.download(id)
+      },
+      'lmc:download-attachment': async (value: unknown) => {
+        const { id, notificationId } = z.object({ id: z.string().max(200), notificationId: z.string().min(1).max(200) }).strict().parse(value)
+        if (!await relogin.ensureConnected('lmc')) return requireConnection('lmc')
+        return lmc.download(id, notificationId)
       },
       'lmc:cancel-download': (id: unknown) => lmc.cancelDownload(id),
       'lmc:reveal-download': (id: unknown) => lmc.revealDownload(id),

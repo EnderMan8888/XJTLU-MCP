@@ -39,9 +39,9 @@ export const MCP_TOOLS = {
   get_library_seats: '指定楼层和时段的座位可用状态',
   reserve_library_seat: '发起座位预约，由你确认后提交',
   get_library_reservations: '指定日期的个人座位预约',
-  get_lmc_notification: '近四个月内指定日期范围的 LMC 通知',
+  get_lmc_notification: '近四个月的 LMC 通知与公告附件',
   list_lmc_modules: 'LMC 当前可见的课程列表',
   get_module_contents: '课程目录、活动类型和文件夹内的文件',
-  download_lmc_file: '在桌面保存 LMC 原文件并查询下载结果'
+  download_lmc_file: '保存 LMC 资料和公告附件，可指定本机路径'
 } as const
 
