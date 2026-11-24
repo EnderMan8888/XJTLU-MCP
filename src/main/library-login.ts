@@ -1,10 +1,13 @@
 import {BrowserWindow,dialog,session,shell} from 'electron'
-import {LIBRARY_HOME,LIBRARY_ORIGIN} from '../shared/library'
+import {setTimeout as delay} from 'node:timers/promises'
+import {LIBRARY_HOME,LIBRARY_ORIGIN,type LibraryFloor} from '../shared/library'
 import {schoolLoginAction,type ConnectionPhase} from '../shared/ams'
 import type {AccountService} from '../services/account-service'
 import {isLibraryLoginNavigation,libraryNavigationLabel} from '../security/library-navigation'
 import {buildAutomaticLoginScript,buildLoginInspectionScript,isAuthenticationOrigin,isCredentialPage,SCHOOL_VERIFICATION_MESSAGE} from '../security/login-policy'
 import {isAbortedNavigation,schoolLoginFailure,SCHOOL_MANUAL_LOGIN_MESSAGE,showSchoolLoginWindow} from './school-login-window'
+import {parseLibraryFloors} from '../providers/library'
+import {libraryFloorPageScript} from '../providers/library-floor-page'
 
 export interface LibraryAuth {token:string;accNo:number}
 export class LibraryLogin {
@@ -131,7 +134,7 @@ export class LibraryLogin {
         const value:unknown=await win.webContents.executeJavaScript(`(()=>{if(location.origin!=='${LIBRARY_ORIGIN}')return null;try{const x=JSON.parse(sessionStorage.getItem('userInfo')||'{}');return {token:typeof x.token==='string'?x.token:'',accNo:x.accNo}}catch{return null}})()`)
         if(!this.valid(g,win))return
         if(value&&typeof value==='object'&&'token'in value&&typeof value.token==='string'&&value.token&&'accNo'in value&&typeof value.accNo==='number'&&Number.isSafeInteger(value.accNo)){
-          this.auth={token:value.token,accNo:value.accNo};this.stop();this.status('connected','已连接学校账号，可查询具体座位和提交预约。');if(!win.isVisible()){win.destroy();this.win=null};return
+          this.auth={token:value.token,accNo:value.accNo};this.stop();this.status('connected','已连接学校账号，可查询具体座位和提交预约。');return
         }
       }
       if(!isAuthenticationOrigin(url))return
@@ -142,7 +145,7 @@ export class LibraryLogin {
       if(this.manual||state!=='credentials'||this.submitted||!isCredentialPage(url))return
       const cg=this.credentialsGeneration,saved=await this.account.read().catch(()=>null)
       if(!this.valid(g,win)||cg!==this.credentialsGeneration)return
-      if(!saved){this.stop();this.status('credentials-required','请在首页“账号与登录”保存学校账号后连接。');return}
+      if(!saved){this.stop();this.status('credentials-required','请在“账号与设置”保存学校账号后连接。');return}
       this.submitted=true
       const task=win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:buildAutomaticLoginScript(saved,`library:${g}:${cg}`)}]);this.automatic=task
       let result:unknown;try{result=await task}finally{if(this.automatic===task)this.automatic=null}
@@ -176,7 +179,35 @@ export class LibraryLogin {
     if(this.win&&!this.win.isDestroyed()){this.show();return}
     this.startLogin('visible')
   }
-  invalidate():void{this.auth=null;this.status('expired','学校登录已过期，请重新连接图书馆账号。')}
+  async readFloorPage(refresh:boolean):Promise<LibraryFloor[]|null>{
+    const win=this.win,g=this.generation
+    if(!this.auth||!win||!this.valid(g,win))return null
+    const onHome=():boolean=>{
+      const url=URL.parse(win.webContents.getURL())
+      return url?.origin===LIBRARY_ORIGIN&&url.hash.split('?')[0]==='#/ic/home'
+    }
+    if(win.isVisible()&&!onHome())return null
+    if(!win.isVisible()&&(refresh||!onHome())){
+      // Only reload our background window. Leave the user's open school page in place.
+      if(onHome())win.webContents.reload()
+      else void win.loadURL(LIBRARY_HOME).catch(()=>{})
+      await delay(250)
+    }
+    const deadline=Date.now()+6_000
+    while(this.valid(g,win)&&this.auth&&Date.now()<deadline){
+      if(!win.webContents.isLoadingMainFrame()){
+        if(!onHome())return null
+        try{
+          const data:unknown=await win.webContents.executeJavaScript(libraryFloorPageScript)
+          if(!this.valid(g,win)||!this.auth||!onHome())return null
+          return parseLibraryFloors(data)
+        }catch{/* The site may still be rendering its floor cards. */}
+      }
+      await delay(250)
+    }
+    return null
+  }
+  invalidate(token:string):void{if(this.auth?.token===token){this.auth=null;this.status('expired','学校登录已过期，请重新连接图书馆账号。')}}
   async cancel():Promise<void>{this.credentialsGeneration++;const c=this.win?.webContents;if(c&&!c.isDestroyed()&&isAuthenticationOrigin(c.getURL()))await c.executeJavaScriptInIsolatedWorld(1001,[{code:'globalThis.__xjtluLoginAttempt=null'}]).catch(()=>{});await this.automatic?.catch(()=>{})}
   async reset():Promise<void>{this.generation++;this.credentialsGeneration++;this.stop();this.auth=null;this.win?.destroy();this.win=null;await this.school.clearStorageData();this.status('idle','账号已切换，请重新连接图书馆。')}
   dispose():void{this.generation++;this.credentialsGeneration++;this.stop();this.auth=null;this.win?.destroy();this.win=null}

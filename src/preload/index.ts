@@ -7,7 +7,10 @@ import type { LibraryState } from '../shared/library'
 import type { McpStatus } from '../shared/mcp'
 import type { LmcState } from '../shared/lmc'
 
-const bridge: CampusBridge = { lmc: {
+const bridge: CampusBridge = { settings: {
+  getAutoRelogin: () => ipcRenderer.invoke('settings:get-auto-relogin'),
+  setAutoRelogin: (service, enabled) => ipcRenderer.invoke('settings:set-auto-relogin', { service, enabled })
+}, lmc: {
   getState: () => ipcRenderer.invoke('lmc:get-state'),
   connect: () => ipcRenderer.invoke('lmc:connect'),
   refresh: () => ipcRenderer.invoke('lmc:refresh'),

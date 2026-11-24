@@ -8,3 +8,11 @@ html,body,#root{height:100%;overflow:hidden}
 .shell>main{display:flex;flex-direction:column;min-height:0;height:100%;overflow:hidden}
 .topbar{flex:0 0 69px}
 .page-scroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.auto-relogin { margin-top: 16px; }
+.auto-relogin-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; border-top: 1px solid #e8edf5; font-weight: 600; cursor: pointer; }
+.auto-relogin-row input { appearance: none; position: relative; flex: 0 0 40px; width: 40px; height: 22px; margin: 0; border: 1px solid #9ca9bf; border-radius: 12px; background: #d8e0ec; cursor: inherit; }
+.auto-relogin-row input::before { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; }
+.auto-relogin-row input:checked { border-color: #3455ad; background: #3455ad; }
+.auto-relogin-row input:checked::before { transform: translateX(18px); }
+.auto-relogin-row input:focus-visible { outline: 2px solid #3455ad; outline-offset: 3px; }
+.auto-relogin-row input:disabled { opacity: .6; cursor: wait; }

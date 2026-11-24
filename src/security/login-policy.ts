@@ -1,12 +1,15 @@
 import type { SavedCredentials } from '../shared/credentials.ts'
 
 const authenticationOrigins = ['https://uim.xjtlu.edu.cn', 'https://sso.xjtlu.edu.cn']
+const uimLoginOrigin = authenticationOrigins[0]
+const uimLoginPath = '/esc-sso/login/page'
+const onUimLoginPage = `location.origin === ${JSON.stringify(uimLoginOrigin)} && location.pathname === ${JSON.stringify(uimLoginPath)}`
 export const SCHOOL_VERIFICATION_MESSAGE = '请在西浦官方窗口选择验证方式，输入短信、邮箱验证码或 OTP，再按学校页面提交。'
 
 export function isCredentialPage(raw: string): boolean {
   try {
     const url = new URL(raw)
-    return url.origin === 'https://uim.xjtlu.edu.cn' && url.pathname === '/esc-sso/login/page' && !url.username && !url.password
+    return url.origin === uimLoginOrigin && url.pathname === uimLoginPath && !url.username && !url.password
   } catch { return false }
 }
 
@@ -37,17 +40,52 @@ const domInspection = String.raw`
   const classify = () => challenge || uncheckedConsent ? 'verification-required' : loginError ? 'login-error' : users.length === 1 && passwords.length === 1 && buttons.length === 1 ? 'credentials' : 'waiting';
 `
 
-export function buildLoginInspectionScript(): string {
+// UIM's accountPsw widget adds this container when the remembered username
+// is shown in a disabled input. Use the school's switch control without reading
+// the underlying saved account or trying to match its masked display.
+const rememberedAccountInspection = String.raw`
+  const rememberedAccountControl = () => {
+    if (users.length !== 1 || passwords.length !== 1 || buttons.length !== 1 || !(users[0].disabled || users[0].readOnly)) return null;
+    const containers = [...document.querySelectorAll('.para-widget-switch-account-content')].filter(shown);
+    if (containers.length !== 1) return null;
+    const matches = element => shown(element) && /^(?:switch accounts?|切换[账帐]号|切換[賬帳]號)$/i.test((element.textContent || '').trim().replace(/\s+/g, ' '));
+    const controls = [...containers[0].querySelectorAll('a, button, [role="button"]')].filter(matches);
+    if (controls.length === 1) return controls[0];
+    if (controls.length) return null;
+    const labels = [...containers[0].querySelectorAll('*')].filter(element => !element.children.length && matches(element));
+    return labels.length === 1 ? labels[0] : null;
+  };
+`
+
+export function buildLoginInspectionScript(checkRememberedAccount = false): string {
   return `(() => {
     if (!${JSON.stringify(authenticationOrigins)}.includes(location.origin)) return 'other-page';
     ${domInspection}
-    return classify();
+    ${checkRememberedAccount ? rememberedAccountInspection : ''}
+    const state = classify();
+    ${checkRememberedAccount ? `if (state === 'credentials' && (${onUimLoginPage}) && rememberedAccountControl()) return 'remembered-account';` : ''}
+    return state;
+  })()`
+}
+
+export function buildSwitchRememberedAccountScript(): string {
+  return `(() => {
+    if (!(${onUimLoginPage})) return 'wrong-page';
+    ${domInspection}
+    ${rememberedAccountInspection}
+    const state = classify();
+    if (state !== 'credentials') return state;
+    const control = rememberedAccountControl();
+    if (!control) return 'waiting';
+    if (passwords[0].value || control.disabled || control.getAttribute('aria-disabled') === 'true') return 'form-unavailable';
+    control.click();
+    return 'switched-account';
   })()`
 }
 
 export function buildAutomaticLoginScript(credentials: SavedCredentials, attempt: string): string {
   return `(async () => {
-    if (location.origin !== 'https://uim.xjtlu.edu.cn' || location.pathname !== '/esc-sso/login/page') return 'wrong-page';
+    if (!(${onUimLoginPage})) return 'wrong-page';
     const attempt = ${JSON.stringify(attempt)};
     globalThis.__xjtluLoginAttempt = attempt;
     if (globalThis.__xjtluSubmittedAttempt === attempt) return 'already-submitted';
@@ -70,7 +108,7 @@ export function buildAutomaticLoginScript(credentials: SavedCredentials, attempt
     }
     await new Promise(resolve => setTimeout(resolve, 50));
     if (globalThis.__xjtluLoginAttempt !== attempt) return 'cancelled';
-    if (location.origin !== 'https://uim.xjtlu.edu.cn' || location.pathname !== '/esc-sso/login/page') return 'wrong-page';
+    if (!(${onUimLoginPage})) return 'wrong-page';
     { ${domInspection}
       const current = classify();
       if (current !== 'credentials') return current;

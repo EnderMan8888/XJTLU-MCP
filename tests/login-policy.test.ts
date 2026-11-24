@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
-import { buildAutomaticLoginScript, buildLoginInspectionScript, isAuthenticationOrigin, isCredentialPage } from '../src/security/login-policy.ts'
+import { buildAutomaticLoginScript, buildLoginInspectionScript, buildSwitchRememberedAccountScript, isAuthenticationOrigin, isCredentialPage } from '../src/security/login-policy.ts'
 
 class TestElement {
   hidden = false
@@ -15,6 +15,8 @@ class TestElement {
   checked = false
   visibility = 'visible'
   ariaLabel: string | null = null
+  textContent = ''
+  children: TestElement[] = []
   getAttribute(name: string): string | null { return name === 'aria-label' ? this.ariaLabel : null }
   getBoundingClientRect(): { width: number; height: number } { return { width: 100, height: 20 } }
 }
@@ -34,6 +36,8 @@ class TestButton extends TestElement {
 function fixture() {
   const username = new TestInput(), password = new TestInput(), button = new TestButton()
   const extra: TestInput[] = [], consents: TestElement[] = []
+  const accountControls: TestButton[] = []
+  const accountContainer = Object.assign(new TestElement(), { querySelectorAll: () => accountControls })
   const context = {
     location: { origin: 'https://uim.xjtlu.edu.cn', pathname: '/esc-sso/login/page' },
     document: {
@@ -44,6 +48,7 @@ function fixture() {
         if (selector.includes('__input--psw')) return [password]
         if (selector.startsWith('button.')) return [button]
         if (selector.includes('__agreement')) return consents
+        if (selector === '.para-widget-switch-account-content') return accountControls.length ? [accountContainer] : []
         return []
       }
     },
@@ -52,7 +57,7 @@ function fixture() {
     Event: class { type: string; constructor(type: string) { this.type = type } },
     setTimeout: ((callback: () => void) => { queueMicrotask(callback) }) as unknown as typeof setTimeout
   }
-  return { username, password, button, extra, consents, context }
+  return { username, password, button, extra, consents, accountControls, context }
 }
 const saved = { username: 'synthetic-account', password: 'synthetic-password' }
 
@@ -191,5 +196,40 @@ describe('automatic school login', () => {
     const { button, context } = fixture(); button.disabled = true
     assert.equal(await vm.runInNewContext(buildAutomaticLoginScript(saved, 'disabled'), context), 'form-unavailable')
     assert.equal(button.clicks, 0)
+  })
+
+  it('uses the official switch control to unlock a masked account before filling saved credentials', async () => {
+    const { username, password, button, accountControls, context } = fixture()
+    username.value = 's**************t'
+    username.disabled = true
+    const switchAccount = new TestButton()
+    switchAccount.textContent = 'Switch accounts'
+    switchAccount.click = () => { switchAccount.clicks++; username.disabled = false; username.value = ''; accountControls.pop() }
+    accountControls.push(switchAccount)
+    assert.equal(vm.runInNewContext(buildLoginInspectionScript(true), context), 'remembered-account')
+    assert.equal(vm.runInNewContext(buildLoginInspectionScript(), context), 'credentials')
+    assert.equal(vm.runInNewContext(buildSwitchRememberedAccountScript(), context), 'switched-account')
+    assert.equal(switchAccount.clicks, 1)
+    assert.equal(password.value, '')
+    assert.equal(await vm.runInNewContext(buildAutomaticLoginScript(saved, 'after-switch'), context), 'submitted')
+    assert.equal(username.value, saved.username)
+    assert.equal(password.value, saved.password)
+    assert.equal(button.clicks, 1)
+  })
+
+  it('leaves the remembered account alone when the user typed a password or the page asks for verification', () => {
+    const { username, password, accountControls, extra, context } = fixture()
+    username.value = 's**************t'
+    username.disabled = true
+    const switchAccount = new TestButton(); switchAccount.textContent = '切换账号'; accountControls.push(switchAccount)
+    password.value = 'typed-password'
+    assert.equal(vm.runInNewContext(buildSwitchRememberedAccountScript(), context), 'form-unavailable')
+    password.value = ''
+    const otp = new TestInput(); otp.autocomplete = 'one-time-code'; extra.push(otp)
+    assert.equal(vm.runInNewContext(buildLoginInspectionScript(true), context), 'verification-required')
+    assert.equal(vm.runInNewContext(buildSwitchRememberedAccountScript(), context), 'verification-required')
+    context.location.pathname = '/esc-sso/other'
+    assert.equal(vm.runInNewContext(buildSwitchRememberedAccountScript(), context), 'wrong-page')
+    assert.equal(switchAccount.clicks, 0)
   })
 })

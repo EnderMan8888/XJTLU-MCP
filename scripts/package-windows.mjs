@@ -54,7 +54,7 @@ async function copyDependency(name, from, target) {
   for (const child of Object.keys(dep.dependencies || {})) await copyDependency(child, source, destination)
 }
 for (const dependency of Object.keys(pkg.dependencies || {})) await copyDependency(dependency, root, appDir)
-await writeFile(join(stage, '使用说明.txt'), `XJTLU-MCP V${pkg.version}\r\n\r\n请完整解压文件夹，再双击 XJTLU-MCP.exe。无需安装 Node.js 或 Electron。\r\n首次使用请在首页“账号与登录”保存学校账号，验证提示按学校网页完成。\r\n账号和会话保存在当前 Windows 用户的 AppData 中，不随本压缩包分发。\r\n请保留文件夹内的 DLL、resources、locales 及许可证文件。\r\n本版本未作代码签名；请核对下载来源及 SHA256。\r\n`)
+await writeFile(join(stage, '使用说明.txt'), `XJTLU-MCP V${pkg.version}\r\n\r\n请完整解压文件夹，再双击 XJTLU-MCP.exe。无需安装 Node.js 或 Electron。\r\n首次使用请在“账号与设置”保存学校账号，验证提示按学校网页完成。\r\n账号和会话保存在当前 Windows 用户的 AppData 中，不随本压缩包分发。\r\n请保留文件夹内的 DLL、resources、locales 及许可证文件。\r\n本版本未作代码签名；请核对下载来源及 SHA256。\r\n`)
 const build = await mkdtemp(join(root, 'dist', '.windows-build-'))
 const versionSource = join(build, 'Version.cs')
 const { version: electronVersion } = JSON.parse(await readFile(join(runtime, '..', 'package.json'), 'utf8'))

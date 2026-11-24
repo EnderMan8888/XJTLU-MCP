@@ -8,10 +8,11 @@ import { libraryNowWindow } from '../shared/library-time.ts'
 import { LibraryError } from '../providers/library.ts'
 import { ebridgeTimetableForDate } from '../shared/ebridge-timetable.ts'
 import { amsRelativeDays, matchModuleAttendance, moduleAttendanceLabels } from '../shared/module-attendance.ts'
+import type { AutoRelogin } from '../services/auto-relogin.ts'
 
 export interface CampusSources {
-  ams: { getState(): AmsState; refresh(): Promise<void>; loadScheduleAttendance(date: string, ebridge: EbridgeState): Promise<void> }
-  ebridge: { getState(): EbridgeState; refresh(): Promise<void>; loadGrades(): Promise<void> }
+  ams: { getState(): AmsState; refresh(userInitiated?: boolean, recover?: boolean): Promise<void>; loadScheduleAttendance(date: string, ebridge: EbridgeState): Promise<void> }
+  ebridge: { getState(): EbridgeState; refresh(recover?: boolean): Promise<void>; loadGrades(): Promise<void> }
   library: {
     getState(): LibraryState
     refresh(): Promise<void>
@@ -70,7 +71,10 @@ export class CampusQueries {
   private pending = new Map<string, Promise<void>>()
   private revision = 0
   private notBefore = 0
-  constructor(sources: CampusSources, now: () => number = Date.now) { this.sources = sources; this.now = now }
+  private relogin?: AutoRelogin
+  constructor(sources: CampusSources, now: () => number = Date.now, relogin?: AutoRelogin) {
+    this.sources = sources; this.now = now; this.relogin = relogin
+  }
 
   cancelPending(): void { this.revision++; this.pending.clear() }
   invalidate(): void { this.cancelPending(); this.notBefore = this.now() }
@@ -112,10 +116,31 @@ export class CampusQueries {
     if (value === 'yesterday' || value === 'tomorrow') return amsRelativeDays(this.now()).find(day => day.offset === (value === 'yesterday' ? -1 : 1))!.date
     return validDate(value) ? value : null
   }
+  private phase(source: CampusSource): ConnectionPhase {
+    return source === 'library' ? this.sources.library.getState().booking.phase : this.sources[source]?.getState().phase ?? 'idle'
+  }
+  private readLive<T>(source: CampusSource, read: () => Promise<T>, afterReconnect = read): Promise<T | undefined> {
+    if (this.relogin) return this.relogin.read(source, read, afterReconnect)
+    return this.phase(source) === 'connected' ? read() : Promise.resolve(undefined)
+  }
+  private loginNeeded(source: string, phase: ConnectionPhase, fallback: string): QueryResult {
+    const message = phase === 'authenticating' || phase === 'loading' ? '学校连接正在恢复，请稍后重试。'
+      : phase === 'verification-required' ? '请在桌面应用的学校窗口完成验证后重试。'
+      : phase === 'manual-login-required' ? '请在桌面应用点击“手动登录”，登录后重试。' : fallback
+    return this.unavailable(source, phase, message, 'not_connected')
+  }
+
+  private refreshOverview(source: 'ams' | 'ebridge' | 'lmc'): Promise<void> {
+    return this.once(source, async () => {
+      const read = () => source === 'ams' ? this.sources.ams.refresh(true, false)
+        : source === 'ebridge' ? this.sources.ebridge.refresh(false) : this.sources.lmc!.refresh()
+      // Establishing the connection already reads the overview.
+      await this.readLive(source, read, async () => {})
+    })
+  }
   private async refresh(source: 'ams' | 'ebridge', enabled: boolean): Promise<string | null> {
-    // Leave disconnected sources under the desktop application's login controls.
-    if (enabled && this.sources[source].getState().phase === 'connected') {
-      try { await this.once(source, () => this.sources[source].refresh()) }
+    if (enabled) {
+      try { await this.refreshOverview(source) }
       catch { return `${source === 'ams' ? 'AMS' : 'eBridge'} 刷新未完成，保留先前可用结果。` }
     }
     return null
@@ -141,15 +166,17 @@ export class CampusQueries {
 
   refreshSource(source: CampusSource): Promise<QueryResult> {
     return this.guarded(async () => {
+      if (source === 'library') return this.getLibraryOverview({ refresh: true })
       const service = this.sources[source]
       if (!service) return this.unavailable(source, 'idle', '数据来源尚未启用。')
-      if (source === 'library') return this.getLibraryOverview({ refresh: true })
-      const before = this.getConnectionStatus().data?.[source] as { phase: ConnectionPhase; connected: boolean }
-      if (!before.connected) return this.unavailable(source, before.phase, '请先在桌面应用连接此服务。', 'not_connected')
+      const before = service.getState().phase
       let issue: string | null = null
-      try { await this.once(source, () => service.refresh()) }
+      try { await this.refreshOverview(source) }
       catch { issue = '刷新未完成。' }
       const state = service.getState()
+      if (state.phase !== 'connected' && (before !== 'connected' || state.phase !== 'error')) {
+        return this.loginNeeded(source, state.phase, '请先在桌面应用连接此服务。')
+      }
       let timestamps: Record<string, string | null>
       if ('coursesComplete' in state) {
         timestamps = { courses: state.coursesAt, notifications: state.notificationsAt }
@@ -188,8 +215,8 @@ export class CampusQueries {
       let state = service.getState()
       const scope = input.scope ?? 'current'
       let issue: string | null = null
-      if (state.phase === 'connected' && (input.refresh || !this.usable(state.grades.recordsAt) || !this.usable(state.grades.componentsAt))) {
-        try { await this.once('ebridge:grades', () => service.loadGrades()) }
+      if (input.refresh || !this.usable(state.grades.recordsAt) || !this.usable(state.grades.componentsAt)) {
+        try { await this.once('ebridge:grades', async () => { await this.readLive('ebridge', () => service.loadGrades()) }) }
         catch { issue = '成绩未能更新，保留先前可用结果。' }
         state = service.getState()
       }
@@ -294,8 +321,8 @@ export class CampusQueries {
       let state = this.sources.ams.getState()
       const cached = state.scheduleAttendance[date]
       let recordIssue: string | null = null
-      if (state.phase === 'connected' && day.rows.length && (input.refresh || (!matchesTerm(cached) && !matchesTerm(state.moduleAttendance)))) {
-        try { await this.once(`records:${date}:${ebridge.timetableAt}`, () => this.sources.ams.loadScheduleAttendance(date, ebridge)) }
+      if (day.rows.length && (input.refresh || (!matchesTerm(cached) && !matchesTerm(state.moduleAttendance)))) {
+        try { await this.once(`records:${date}:${ebridge.timetableAt}`, async () => { await this.readLive('ams', () => this.sources.ams.loadScheduleAttendance(date, ebridge)) }) }
         catch { recordIssue = '单节考勤未能更新，保留先前可用结果。' }
         state = this.sources.ams.getState()
       }
@@ -346,20 +373,29 @@ export class CampusQueries {
   private libraryFailure(error: unknown): QueryResult {
     const phase = this.sources.library.getState().booking.phase
     if (!(error instanceof LibraryError)) return this.unavailable('Seatbookings', phase, '图书馆查询未能完成，请在桌面应用检查连接。')
-    const code = error.kind === 'auth' ? 'not_connected' : error.kind === 'validation' ? 'invalid_request' : error.kind === 'rate-limit' ? 'rate_limited' : 'data_unavailable'
+    if (error.kind === 'auth') return this.loginNeeded('Seatbookings', phase, error.message)
+    const code = error.kind === 'validation' ? 'invalid_request' : error.kind === 'rate-limit' ? 'rate_limited' : 'data_unavailable'
     return this.unavailable('Seatbookings', phase, error.message, code)
+  }
+
+  private readLibrarySeats(query: SeatSearch): Promise<Awaited<ReturnType<CampusSources['library']['readSeats']>> | undefined> {
+    const service = this.sources.library
+    return this.readLive('library', async () => {
+      if (!service.getState().fetchedAt) await this.once('library', () => service.refresh())
+      return service.readSeats(query)
+    })
   }
 
   getLibrarySeats(input: SeatWindowInput): Promise<QueryResult> {
     return this.guarded(async () => {
-      const service = this.sources.library, state = service.getState()
-      if (state.booking.phase !== 'connected') return this.unavailable('Seatbookings', state.booking.phase, '请先在桌面应用连接图书馆账号。', 'not_connected')
       const query = this.seatWindow(input)
       if (!query) return this.unavailable('Seatbookings', 'connected', '请输入有效的未来起止时间，或省略时间查询今天现在至 22:00。', 'invalid_time')
       try {
-        if (!state.fetchedAt) await this.once('library', () => service.refresh())
-        const { query: used, seats, fetchedAt } = await service.readSeats(query)
-        return this.result('Seatbookings', service.getState().booking.phase, fetchedAt, null, {
+        const data = await this.readLibrarySeats(query)
+        const phase = this.phase('library')
+        if (!data) return this.loginNeeded('Seatbookings', phase, '请先在桌面应用连接图书馆账号。')
+        const { query: used, seats, fetchedAt } = data
+        return this.result('Seatbookings', phase, fetchedAt, null, {
           ...used, availableCount: seats.filter(seat => seat.available).length,
           seats: seats.map(({ id, name, ...seat }) => ({ seatId: id, seatNumber: name, ...seat }))
         })
@@ -370,12 +406,13 @@ export class CampusQueries {
   getLibraryReservations(input: { date?: string }): Promise<QueryResult> {
     return this.guarded(async () => {
       const service = this.sources.library, phase = service.getState().booking.phase
-      if (phase !== 'connected') return this.unavailable('Seatbookings', phase, '请先在桌面应用连接图书馆账号。', 'not_connected')
       const date = this.date(input.date)
       if (!date) return this.unavailable('Seatbookings', phase, '预约查询日期无效。', 'invalid_date')
       try {
-        const reservations = await service.getReservations(date)
-        return this.result('Seatbookings', service.getState().booking.phase, new Date(this.now()).toISOString(), null, { date, reservations })
+        const reservations = await this.readLive('library', () => service.getReservations(date))
+        const current = this.phase('library')
+        if (!reservations) return this.loginNeeded('Seatbookings', current, '请先在桌面应用连接图书馆账号。')
+        return this.result('Seatbookings', current, new Date(this.now()).toISOString(), null, { date, reservations })
       } catch (error) { return this.libraryFailure(error) }
     })
   }
@@ -389,12 +426,12 @@ export class CampusQueries {
         request = service.agentBookings.get(input.requestId)
         if (!request) return this.unavailable('Seatbookings', phase, '未找到该预约请求。', 'request_not_found')
       } else {
-        if (phase !== 'connected') return this.unavailable('Seatbookings', phase, '请先在桌面应用连接图书馆账号。', 'not_connected')
         const query = this.seatWindow(input)
         if (!query) return this.unavailable('Seatbookings', phase, '请输入有效的未来起止时间，或省略时间预约今天现在至 22:00。', 'invalid_time')
         try {
-          if (!state.fetchedAt) await this.once('library', () => service.refresh())
-          const { query: used, seats } = await service.readSeats(query)
+          const data = await this.readLibrarySeats(query)
+          if (!data) return this.loginNeeded('Seatbookings', this.phase('library'), '请先在桌面应用连接图书馆账号。')
+          const { query: used, seats } = data
           const matches = seats.filter(seat => 'seatId' in input ? seat.id === input.seatId : seat.name.trim().toLowerCase() === input.seatNumber.toLowerCase())
           if (matches.length !== 1) return this.unavailable('Seatbookings', phase, '未能唯一匹配楼层和座位，请先查询座位并使用对应的 seatId。', 'seat_not_found')
           const [seat] = matches
@@ -424,10 +461,10 @@ export class CampusQueries {
       if (!validDate(from) || !validDate(to) || from < oldest || from > to || to > today) {
         return this.unavailable(source, 'error', `请指定北京时间 ${oldest} 至 ${today} 内的有效日期范围。`, 'invalid_date_range')
       }
-      const state = service?.getState()
-      if (!service || state?.phase !== 'connected') return this.unavailable(source, state?.phase ?? 'idle', '请先在桌面应用连接 Learning Mall Core。', 'not_connected')
-      const range = await service.readNotificationRange(Date.parse(`${from}T00:00:00+08:00`))
+      if (!service) return this.loginNeeded(source, 'idle', '请先在桌面应用连接 Learning Mall Core。')
+      const range = await this.readLive('lmc', () => service.readNotificationRange(Date.parse(`${from}T00:00:00+08:00`)))
       const phase = service.getState().phase
+      if (!range || (!this.usable(range.fetchedAt) && phase !== 'connected')) return this.loginNeeded(source, phase, '请先在桌面应用连接 Learning Mall Core。')
       if (!this.usable(range.fetchedAt)) return this.unavailable(source, phase, range.issue || '尚未读取通知。')
       let undatedCount = 0, hiddenSignInCount = 0
       const notifications = range.notifications.filter(item => {
@@ -449,8 +486,8 @@ export class CampusQueries {
       if (!service) return this.unavailable(source, 'idle', 'Learning Mall Core 尚未启用。')
       let state = service.getState()
       let issue: string | null = null
-      if (state.phase === 'connected' && (input.refresh || !this.usable(state.coursesAt))) {
-        try { await this.once('lmc', () => service.refresh()) }
+      if (input.refresh || !this.usable(state.coursesAt)) {
+        try { await this.refreshOverview('lmc') }
         catch { issue = 'LMC 课程列表未能更新，保留先前可用结果。' }
         state = service.getState()
       }
@@ -468,8 +505,8 @@ export class CampusQueries {
       const course = state.courses.find(item => item.id === input.courseId)
       if (!course || !this.usable(state.coursesAt)) return this.unavailable(source, state.phase, '请先读取 LMC 课程列表并选择返回的 courseId。', 'course_not_found')
       let issue: string | null = null
-      if (state.phase === 'connected' && (!this.usable(state.modules[course.id]?.fetchedAt) || input.refresh && !input.folderId)) {
-        try { await this.once(`lmc:course:${course.id}`, () => service.loadCourse(course.id)) }
+      if (!this.usable(state.modules[course.id]?.fetchedAt) || input.refresh && !input.folderId) {
+        try { await this.once(`lmc:course:${course.id}`, async () => { await this.readLive('lmc', () => service.loadCourse(course.id)) }) }
         catch { issue = '课程目录未能更新，保留先前可用结果。' }
         state = service.getState()
       }
@@ -483,8 +520,8 @@ export class CampusQueries {
       }
       const folderId = input.folderId
       if (!module.activities.some(row => row.id === folderId && row.type === 'folder')) return this.unavailable(source, state.phase, '未找到该课程的文件夹。', 'folder_not_found')
-      if (state.phase === 'connected' && (input.refresh || !this.usable(module.folders[folderId]?.fetchedAt))) {
-        try { await this.once(`lmc:folder:${folderId}`, () => service.loadFolder(folderId)) }
+      if (input.refresh || !this.usable(module.folders[folderId]?.fetchedAt)) {
+        try { await this.once(`lmc:folder:${folderId}`, async () => { await this.readLive('lmc', () => service.loadFolder(folderId)) }) }
         catch { issue = '文件夹未能更新，保留先前可用结果。' }
         state = service.getState()
       }
@@ -504,7 +541,7 @@ export class CampusQueries {
       let downloadId: string | null
       if ('downloadId' in input) downloadId = input.downloadId
       else {
-        if (state.phase !== 'connected') return this.unavailable(source, state.phase, '请先在桌面应用连接 Learning Mall Core。', 'not_connected')
+        if (state.phase !== 'connected' && state.phase !== 'expired') return this.loginNeeded(source, state.phase, '请先在桌面应用连接 Learning Mall Core。')
         const module = state.modules[input.courseId]
         if (!this.usable(state.coursesAt) || !state.courses.some(course => course.id === input.courseId) || !this.usable(module?.fetchedAt)) {
           return this.unavailable(source, state.phase, '请先读取该课程目录。', 'course_not_found')
@@ -524,6 +561,7 @@ export class CampusQueries {
           matches = resources.filter(item => item.title === input.fileName && (!input.path || item.section === input.path)).map(item => item.id)
         }
         if (matches.length !== 1) return this.unavailable(source, state.phase, '请打开课程目录或文件夹，使用返回的 fileId 唯一定位文件。', matches.length ? 'ambiguous_file' : 'file_not_found')
+        if (state.phase !== 'connected' && !await this.relogin?.ensureConnected('lmc')) return this.loginNeeded(source, this.phase('lmc'), '请先在桌面应用连接 Learning Mall Core。')
         try { downloadId = await service.startDownload(matches[0]) }
         catch { return this.unavailable(source, service.getState().phase, '未能开始下载，请检查 LMC 连接和桌面应用的下载状态。', 'download_failed') }
         if (!downloadId) return this.unavailable(source, service.getState().phase, '下载在开始前已取消。', 'cancelled')

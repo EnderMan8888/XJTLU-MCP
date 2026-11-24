@@ -4,7 +4,7 @@ import { EBRIDGE_ENTRY, EBRIDGE_ORIGIN, initialEbridgeState, type EbridgeState, 
 import type { CredentialStatus } from '../shared/credentials'
 import type { AccountConsumer, AccountService } from '../services/account-service'
 import type { EbridgeCache } from '../infrastructure/ebridge-cache'
-import { buildAutomaticLoginScript, buildLoginInspectionScript, isAuthenticationOrigin, isCredentialPage, SCHOOL_VERIFICATION_MESSAGE } from '../security/login-policy'
+import { buildAutomaticLoginScript, buildLoginInspectionScript, buildSwitchRememberedAccountScript, isAuthenticationOrigin, isCredentialPage, SCHOOL_VERIFICATION_MESSAGE } from '../security/login-policy'
 import { isAbortedNavigation, schoolLoginFailure, SCHOOL_MANUAL_LOGIN_MESSAGE, showSchoolLoginWindow } from './school-login-window'
 import { parseCourses, parseExams, parseTimetable, parseTimetableTerm, portalInspectionScript, selectPortalLink, type PortalDocument, type PortalLink } from '../providers/ebridge'
 import { ebridgeGradeInspection, parseEbridgeGrades, selectGradeLinks } from '../providers/ebridge-grades'
@@ -28,6 +28,7 @@ export class EbridgeService implements AccountConsumer {
   private watch: ReturnType<typeof setInterval> | null = null
   private ticking = false
   private submitted = false
+  private switchRequested = false
   private manual = false
   private ssoClicked = false
   private deadline = 0
@@ -148,7 +149,27 @@ export class EbridgeService implements AccountConsumer {
     if (this.state.phase === 'manual-login-required') return
     if (this.state.phase === 'verification-required' && this.window) { await this.showLogin(); return }
     if (this.watch || this.pending) return
+    const win = this.window
+    if (win && !win.isDestroyed() && isAuthenticationOrigin(win.webContents.getURL())) {
+      this.resumeAuthentication(this.generation, win)
+      return
+    }
     this.startLogin(false)
+  }
+
+  private watchAuthentication(g: number, win: BrowserWindow, manual: boolean): void {
+    this.deadline = Date.now() + 75_000
+    this.watch = setInterval(() => void this.tick(g, win), 750)
+    this.update(manual ? { phase: 'manual-login-required', message: SCHOOL_MANUAL_LOGIN_MESSAGE }
+      : { phase: 'authenticating', message: '正在恢复 eBridge 会话并连接学校统一认证…' })
+  }
+
+  private resumeAuthentication(g: number, win: BrowserWindow): void {
+    if (!this.valid(g, win) || this.watch) return
+    this.credentialGeneration++
+    this.submitted = false; this.switchRequested = false; this.ssoClicked = false; this.manual = false
+    this.watchAuthentication(g, win, false)
+    void this.tick(g, win)
   }
 
   private startLogin(manual: boolean): void {
@@ -159,7 +180,7 @@ export class EbridgeService implements AccountConsumer {
     const previous = this.window
     this.window = null
     previous?.destroy()
-    this.submitted = false; this.ssoClicked = false; this.manual = manual; this.explicit = manual
+    this.submitted = false; this.switchRequested = false; this.ssoClicked = false; this.manual = manual; this.explicit = manual
     const win = new BrowserWindow({ title: '西浦官方页面 · eBridge', width: 1180, height: 820, show: manual, autoHideMenuBar: true, webPreferences: { session: this.school, nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } })
     this.window = win
     win.webContents.setWindowOpenHandler(({ url }) => { if (schoolUrl(url)) void win.loadURL(url).catch(() => {}); return { action: 'deny' } })
@@ -172,12 +193,13 @@ export class EbridgeService implements AccountConsumer {
       if (this.state.phase === 'manual-login-required') this.loginFailed('学校窗口已关闭。', false)
       else this.update({ phase: 'idle', message: '学校窗口已关闭，可以重新连接。', grades: { ...this.state.grades, loading: false } })
     })
-    this.deadline = Date.now() + 75_000
-    this.update(manual ? { phase: 'manual-login-required', message: SCHOOL_MANUAL_LOGIN_MESSAGE }
-      : { phase: 'authenticating', message: '正在恢复 eBridge 会话并连接学校统一认证…' })
-    const tick = (): void => { void this.tick(g, win) }
-    this.watch = setInterval(tick, 750)
-    win.webContents.on('did-finish-load', tick)
+    this.watchAuthentication(g, win, manual)
+    win.webContents.on('did-finish-load', () => {
+      if (!this.valid(g, win)) return
+      if (!this.watch && !this.pending && this.state.phase === 'connected' && isAuthenticationOrigin(win.webContents.getURL())) {
+        this.resumeAuthentication(g, win)
+      } else void this.tick(g, win)
+    })
     void win.loadURL(EBRIDGE_ENTRY).catch(error => {
       if (!isAbortedNavigation(error) && this.valid(g, win) && this.watch && this.state.phase !== 'verification-required') this.loginFailed('eBridge 页面加载失败，请检查网络。', false)
     })
@@ -190,16 +212,27 @@ export class EbridgeService implements AccountConsumer {
       if (win.webContents.isLoadingMainFrame()) return
       const url = win.webContents.getURL()
       if (isAuthenticationOrigin(url)) {
-        const status = await win.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: buildLoginInspectionScript() }])
+        const status = await win.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: buildLoginInspectionScript(true) }])
         if (!this.valid(g, win)) return
         if (status === 'verification-required') { this.attention(SCHOOL_VERIFICATION_MESSAGE); return }
         if (status === 'login-error') { this.loginFailed('学校登录未通过。'); return }
-        if (this.manual || status !== 'credentials' || this.submitted || !isCredentialPage(url)) return
+        if (this.manual || this.submitted || !isCredentialPage(url)) return
+        if (status !== 'credentials' && status !== 'remembered-account') return
+        if (status === 'remembered-account' && this.switchRequested) return
         const credentialGeneration = this.credentialGeneration
         const saved = await this.account.read().catch(() => null)
         if (!this.valid(g, win) || credentialGeneration !== this.credentialGeneration) return
-        if (!saved) { this.stop(); this.update({ phase: 'credentials-required', message: '请先到首页“账号与登录”保存学校账号。' }); return }
+        if (!saved) { this.stop(); this.update({ phase: 'credentials-required', message: '请先到“账号与设置”保存学校账号。' }); return }
         if (!isCredentialPage(win.webContents.getURL())) return
+        if (status === 'remembered-account') {
+          this.switchRequested = true
+          const switched = await win.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: buildSwitchRememberedAccountScript() }])
+          if (!this.valid(g, win) || credentialGeneration !== this.credentialGeneration) return
+          if (switched === 'verification-required') this.attention(SCHOOL_VERIFICATION_MESSAGE)
+          else if (switched === 'switched-account') this.update({ message: '正在切换到可输入账号的学校登录页…' })
+          else if (switched !== 'wrong-page' && switched !== 'waiting') this.loginFailed('学校认证页未能自动切换账号。')
+          return
+        }
         this.submitted = true
         const task = win.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: buildAutomaticLoginScript(saved, `ebridge:${g}:${credentialGeneration}`) }])
         this.automaticPending = task
@@ -272,7 +305,7 @@ export class EbridgeService implements AccountConsumer {
     return docs
   }
 
-  private async readAll(g: number, win: BrowserWindow, initial: PortalDocument[]): Promise<void> {
+  private async readAll(g: number, win: BrowserWindow, initial: PortalDocument[], onExpired?: () => void): Promise<void> {
     this.update({ phase: 'loading', message: '正在读取 eBridge 课程、课表与考试安排…' })
     this.diagnosticDocs('portal', initial)
     const portalUrl = win.webContents.getURL()
@@ -303,6 +336,7 @@ export class EbridgeService implements AccountConsumer {
           if (overview) this.routes.set('exams',link.href)
           docs = await this.navigate(win, link.href)
           if (!this.valid(g, win)) return
+          if (onExpired && (isAuthenticationOrigin(win.webContents.getURL()) || docs.some(doc => doc.login || doc.sso))) { onExpired(); return }
           this.diagnosticDocs(kind, docs)
           discovered.push(...docs)
           // Personal exam sittings are on the Timetables overview, before the
@@ -315,6 +349,7 @@ export class EbridgeService implements AccountConsumer {
             this.routes.set(kind, child.href)
             docs = await this.navigate(win, child.href)
             if (!this.valid(g, win)) return
+            if (onExpired && (isAuthenticationOrigin(win.webContents.getURL()) || docs.some(doc => doc.login || doc.sso))) { onExpired(); return }
             this.diagnosticDocs(`${kind}-detail`, docs)
           }
         }
@@ -323,6 +358,7 @@ export class EbridgeService implements AccountConsumer {
       } catch { /* Keep each academic view independent if the other fails. */ }
     }
     if (!this.valid(g, win)) return
+    if (onExpired && isAuthenticationOrigin(win.webContents.getURL())) { onExpired(); return }
     if (courses && timetable) {
       const titles = new Map(courses.map(c => [c.code,c.title]))
       timetable = timetable.map(s => ({...s,title:titles.get(s.code) || s.title}))
@@ -347,17 +383,33 @@ export class EbridgeService implements AccountConsumer {
     if (this.valid(g, win) && this.explicit && !this.routes.size && academicUrl(portalUrl)) await win.loadURL(portalUrl).catch(() => {})
   }
 
-  refresh(): Promise<void> {
-    if (this.disconnectTask) return this.disconnectTask.then(() => this.refresh())
+  refresh(recover = true): Promise<void> {
+    if (this.disconnectTask) return this.disconnectTask.then(() => { if (recover) return this.refresh() })
     if (this.state.phase === 'manual-login-required') return Promise.resolve()
     if (this.state.phase === 'verification-required') return this.showLogin()
     if (this.pending) return this.pending
     if (this.watch) return Promise.resolve()
     const win = this.window, g = this.generation
-    if (!win || win.isDestroyed()) return this.connect()
+    if (!win || win.isDestroyed()) return recover ? this.connect() : Promise.resolve()
+    const onExpired = (): void => {
+      if (recover) this.resumeAuthentication(g, win)
+      else this.update({ phase: 'expired', message: 'eBridge 会话已过期，请重新连接。' })
+    }
+    if (isAuthenticationOrigin(win.webContents.getURL())) {
+      onExpired()
+      return Promise.resolve()
+    }
     const task = (async () => {
-      try { const docs = await this.navigate(win, EBRIDGE_ENTRY); if (this.valid(g, win)) { if (docs.some(d => d.login || d.sso) || isAuthenticationOrigin(win.webContents.getURL())) { this.pending = null; await this.connect(); return }; await this.readAll(g, win, docs) } }
-      catch { if (this.valid(g, win)) this.fail('eBridge 暂时无法读取，请重新连接。') }
+      try {
+        const docs = await this.navigate(win, EBRIDGE_ENTRY)
+        if (!this.valid(g, win)) return
+        if (docs.some(d => d.login || d.sso) || isAuthenticationOrigin(win.webContents.getURL())) onExpired()
+        else await this.readAll(g, win, docs, onExpired)
+      } catch {
+        if (!this.valid(g, win)) return
+        if (isAuthenticationOrigin(win.webContents.getURL())) onExpired()
+        else this.fail('eBridge 暂时无法读取，请重新连接。')
+      }
     })().finally(() => { if (this.pending === task) this.pending = null })
     this.pending = task
     return task

@@ -10,6 +10,9 @@ import { initialLibraryState } from '../src/shared/library.ts'
 import { initialLmcState } from '../src/shared/lmc.ts'
 import { McpService } from '../src/main/mcp-service.ts'
 import { AgentBookings } from '../src/main/agent-bookings.ts'
+import { AutoRelogin } from '../src/services/auto-relogin.ts'
+import { defaultAutoRelogin } from '../src/shared/auto-relogin.ts'
+import { LibraryError } from '../src/providers/library.ts'
 
 const now = Date.parse('2026-11-17T02:00:00Z')
 const stamp = new Date(now).toISOString()
@@ -94,6 +97,72 @@ function fixture() {
   }
   return { ams, ebridge, library, lmc, folderId, fileId, downloadId, sources, queries: new CampusQueries(sources, () => now), counts: () => ({ attendanceLoads, amsRefreshes, ebridgeRefreshes }), submissions: () => submissions }
 }
+
+it('automatic re-login follows each service setting and leaves cached and public queries alone', async () => {
+  const f = fixture()
+  const settings = { ...defaultAutoRelogin, ams: true, ebridge: true, lmc: true }
+  const attempts = { ams: 0, ebridge: 0, library: 0, lmc: 0 }
+  f.ams.phase = f.ebridge.phase = f.lmc.phase = f.library.booking.phase = 'expired'
+  const relogin = new AutoRelogin({
+    ams: { phase: () => f.ams.phase, async connect() { attempts.ams++; f.ams.phase = 'connected' } },
+    ebridge: { phase: () => f.ebridge.phase, async connect() { attempts.ebridge++; f.ebridge.phase = 'connected' } },
+    lmc: { phase: () => f.lmc.phase, async connect() { attempts.lmc++; f.lmc.phase = 'connected' } },
+    library: { phase: () => f.library.booking.phase, async connect() {
+      attempts.library++
+      f.library.booking.phase = 'authenticating'
+      await new Promise(resolve => setTimeout(resolve, 5))
+      f.library.booking.phase = 'connected'
+    } }
+  }, service => settings[service])
+  const queries = new CampusQueries(f.sources, () => now, relogin)
+  assert.equal((await queries.getTimetable({})).stale, true)
+  assert.equal((await queries.getAttendanceSummary({})).stale, true)
+  assert.equal((await queries.getLibraryOverview({ refresh: true })).ok, true)
+  assert.equal((await queries.getLibraryReservations({})).code, 'not_connected')
+  assert.deepEqual(attempts, { ams: 0, ebridge: 0, library: 0, lmc: 0 })
+  assert.equal((await queries.getLmcNotification({})).complete, true)
+  assert.equal((await queries.getTimetable({ refresh: true })).stale, false)
+  assert.equal((await queries.getAttendanceSummary({ refresh: true })).stale, false)
+  settings.library = true
+  const [seats, records] = await Promise.all([queries.getLibrarySeats({ floorId: 3 }), queries.getLibraryReservations({})])
+  assert.equal(seats.complete, true)
+  assert.equal(records.complete, true)
+  assert.deepEqual(attempts, { ams: 1, ebridge: 1, library: 1, lmc: 1 })
+})
+
+it('automatic re-login retries an expired live read once and stops at school verification', async () => {
+  const f = fixture()
+  f.lmc.phase = f.library.booking.phase = 'connected'
+  let lmcReads = 0, lmcLogins = 0, libraryLogins = 0
+  const readNotifications = f.sources.lmc!.readNotificationRange
+  f.sources.lmc!.readNotificationRange = async since => {
+    if (++lmcReads === 1) {
+      f.lmc.phase = 'expired'
+      return { notifications: [], fetchedAt: null, complete: false, issue: 'Session expired' }
+    }
+    return readNotifications(since)
+  }
+  f.sources.library.getReservations = async () => {
+    f.library.booking.phase = 'expired'
+    throw new LibraryError('auth', 'Session expired')
+  }
+  const relogin = new AutoRelogin({
+    ams: { phase: () => f.ams.phase, async connect() {} },
+    ebridge: { phase: () => f.ebridge.phase, async connect() {} },
+    lmc: { phase: () => f.lmc.phase, async connect() { lmcLogins++; f.lmc.phase = 'connected' } },
+    library: { phase: () => f.library.booking.phase, async connect() { libraryLogins++; f.library.booking.phase = 'verification-required' } }
+  }, () => true)
+  const queries = new CampusQueries(f.sources, () => now, relogin)
+  assert.equal((await queries.getLmcNotification({})).complete, true)
+  assert.equal(lmcReads, 2)
+  assert.equal(lmcLogins, 1)
+  for (let index = 0; index < 2; index++) {
+    const response = await queries.getLibraryReservations({})
+    assert.equal(response.code, 'not_connected')
+    assert.match(response.message!, /学校窗口完成验证/)
+  }
+  assert.equal(libraryLogins, 1)
+})
 
 it('MCP reports authenticated library status separately from public floor metadata, without account details', () => {
   const f = fixture(); f.library.phase = 'ready'; f.library.fetchedAt = stamp; f.ams.phase = 'verification-required'

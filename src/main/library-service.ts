@@ -26,24 +26,35 @@ export class LibraryService implements AccountConsumer {
   private draft:{public:BookingDraft;selection:SeatSelection;rules:Rules;generation:number}|null=null
   readonly agentBookings = new AgentBookings(this, agentBooking => this.update({agentBooking}))
   constructor(private publish:(state:LibraryState)=>void,account:AccountService,private diagnostic=false){
-    this.login=new LibraryLogin(account,(phase,message)=>{this.update({booking:{phase,message}});if(phase==='connected'&&process.argv.includes('--diagnose-library')&&!this.diagnosed){this.diagnosed=true;void this.diagnose().catch(()=>console.error('Library diagnosis could not complete.'))}})
+    this.login=new LibraryLogin(account,(phase,message)=>{
+      this.update({booking:{phase,message}})
+      if(phase!=='connected')return
+      void this.loadFloorsAfterLogin()
+      if(process.argv.includes('--diagnose-library')&&!this.diagnosed){this.diagnosed=true;void this.diagnose().catch(()=>console.error('Library diagnosis could not complete.'))}
+    })
   }
   getState():LibraryState{return structuredClone(this.state)}
   private update(value:Partial<LibraryState>):void{if(!this.disposed){this.state={...this.state,...value};this.publish(this.getState())}}
   private async request(path:string,token='',body?:unknown):Promise<unknown>{
     if(Date.now()<this.retryNotBefore)throw new LibraryError('rate-limit','学校要求稍后再访问，请等待页面显示的重试时间。',this.retryNotBefore-Date.now())
     try{return await libraryRequest((url,init)=>(token?this.login.school:this.querySession).fetch(url,init),path,token,body)}
-    catch(error){if(error instanceof LibraryError){if(error.kind==='auth'&&token)this.login.invalidate();if(error.kind==='rate-limit'){this.retryNotBefore=Math.max(this.retryNotBefore,Date.now()+error.retryMs);this.update({retryAt:new Date(this.retryNotBefore).toISOString()})}}throw error}
+    catch(error){if(error instanceof LibraryError){if(error.kind==='auth'&&token)this.login.invalidate(token);if(error.kind==='rate-limit'){this.retryNotBefore=Math.max(this.retryNotBefore,Date.now()+error.retryMs);this.update({retryAt:new Date(this.retryNotBefore).toISOString()})}}throw error}
   }
-  refresh():Promise<void>{
+  private async loadFloorsAfterLogin():Promise<void>{
+    await this.pending
+    if(!this.disposed&&this.state.booking.phase==='connected'&&!this.state.floors.length)await this.loadFloors(true)
+  }
+  refresh():Promise<void>{return this.loadFloors(false)}
+  private loadFloors(afterLogin:boolean):Promise<void>{
     if(this.pending)return this.pending
-    const wait=Math.max(this.requestAt+10_000,this.retryNotBefore)-Date.now()
-    if(wait>0)return Promise.resolve()
+    const now=Date.now()
+    if(now<this.retryNotBefore||(!afterLogin&&now<this.requestAt+10_000))return Promise.resolve()
     this.requestAt=Date.now()
     const task=(async()=>{
       this.update({phase:'loading',message:'正在读取可预约楼层…'})
       try{
-        const floors=parseLibraryFloors(await this.request('seatMenu'))
+        const pageFloors=await this.login.readFloorPage(this.state.fetchedAt!==null)
+        const floors=pageFloors??parseLibraryFloors(await this.request('seatMenu'))
         if(this.disposed)return
         this.update({phase:'ready',message:'楼层列表已更新，请选择日期、时段和座位。',floors,fetchedAt:new Date().toISOString(),retryAt:null})
         if(this.diagnostic)console.log('LIBRARY_FLOORS',JSON.stringify({floors:floors.length}))

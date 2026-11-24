@@ -182,7 +182,7 @@ export class AmsService implements AccountConsumer {
       if (generation !== this.generation || credentialGeneration !== this.credentialGeneration || win.isDestroyed()) return
       if (!saved) {
         this.stopWatch()
-        this.update({ phase: 'credentials-required', message: '请在首页的“账号与登录”中保存学校账号，之后由程序自动登录。' })
+        this.update({ phase: 'credentials-required', message: '请在“账号与设置”中保存学校账号，之后由程序自动登录。' })
         return
       }
       if (!isCredentialPage(win.webContents.getURL())) return
@@ -225,14 +225,14 @@ export class AmsService implements AccountConsumer {
 
   async reconnect(userInitiated = true): Promise<void> {
     if (userInitiated) this.recoveries = 0
-    this.generation++
+    const generation = ++this.generation
     this.authenticating = false
     this.stopWatch()
     const previous = this.login
     this.login = null
     previous?.destroy()
     await this.school.clearStorageData({ origin: AMS_ORIGIN, storages: ['localstorage'] })
-    this.beginLogin(false)
+    if (generation === this.generation && !this.disposed) this.beginLogin(false)
   }
 
   private async readSession(generation: number): Promise<void> {
@@ -250,18 +250,23 @@ export class AmsService implements AccountConsumer {
     if (term.success) this.currentTerm = term.data
   }
 
-  refresh(userInitiated = true): Promise<void> {
+  refresh(userInitiated = true, recover = true): Promise<void> {
     if (userInitiated && this.state.phase === 'manual-login-required') return Promise.resolve()
     if (!this.token) return this.openLogin()
     if (this.pending) return this.pending
     if (userInitiated) this.recoveries = 0
     const generation = this.generation
-    const task = this.performRefresh(generation).finally(() => { if (this.pending === task) this.pending = null })
+    const task = this.performRefresh(generation, recover).finally(() => { if (this.pending === task) this.pending = null })
     this.pending = task
     return task
   }
 
-  private async performRefresh(generation: number): Promise<void> {
+  private expire(): void {
+    this.token = ''
+    this.update({ phase: 'expired', message: 'AMS 会话已过期，请重新连接。' })
+  }
+
+  private async performRefresh(generation: number, recover: boolean): Promise<void> {
     this.update({ phase: 'loading', message: '正在读取 AMS 课程列表、签到率和近期课表…' })
     const term = this.selectedTerm ?? this.currentTerm
     const fetcher = (url: string, init: RequestInit): Promise<Response> => this.school.fetch(url, init)
@@ -273,6 +278,7 @@ export class AmsService implements AccountConsumer {
     if (generation !== this.generation || this.disposed) return
     const authenticationFailure = [timetable, modules, terms].some((result) => result.status === 'rejected' && result.reason instanceof AmsError && result.reason.kind === 'auth')
     if (authenticationFailure) {
+      if (!recover) { this.expire(); return }
       this.token = ''
       if (!this.manual && this.recoveries++ < 1) { await this.reconnect(false); return }
       this.loginFailed('学校会话未能建立。', false)
@@ -323,6 +329,8 @@ export class AmsService implements AccountConsumer {
       const codes=[...new Set(query.moduleCodes.map(code=>code.toUpperCase()))].filter(code=>enrolled.has(code))
       const results=await Promise.allSettled(codes.map(code=>fetchModuleRecords(token,query,code,fetcher)))
       if(!valid())return
+      const authFailure = results.find(result => result.status === 'rejected' && result.reason instanceof AmsError && result.reason.kind === 'auth')
+      if (authFailure?.status === 'rejected') throw authFailure.reason
       const failed=results.flatMap((r,i)=>r.status==='rejected'?[codes[i]]:[])
       const missing=query.moduleCodes.filter(code=>!enrolled.has(code.toUpperCase()))
       const records=results.flatMap(r=>r.status==='fulfilled'?r.value:[])
@@ -333,7 +341,10 @@ export class AmsService implements AccountConsumer {
       publish({...query,records,fetchedAt:failed.length===codes.length&&codes.length?(same?previous.fetchedAt:null):new Date().toISOString(),loading:false,issue:issue||null})
       if(process.argv.includes('--inspect-home'))console.log('AMS_MODULE_ATTENDANCE',JSON.stringify({view:target,courses:codes.length,records:records.length,failed:failed.length,statuses:records.map(r=>r.attendance)}))
     }catch(error){
-      if(valid())publish({...query,records:cached,fetchedAt:same?previous.fetchedAt:null,loading:false,issue:error instanceof AmsError?error.message:'Module 单节考勤读取失败，请重试。'})
+      if(valid()){
+        publish({...query,records:cached,fetchedAt:same?previous.fetchedAt:null,loading:false,issue:error instanceof AmsError?error.message:'Module 单节考勤读取失败，请重试。'})
+        if (error instanceof AmsError && error.kind === 'auth') this.expire()
+      }
     }
   }
 

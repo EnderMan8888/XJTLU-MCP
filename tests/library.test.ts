@@ -1,7 +1,31 @@
 import {it} from 'node:test'
 import assert from 'node:assert/strict'
+import {runInNewContext} from 'node:vm'
 import {libraryNowWindow} from '../src/shared/library-time.ts'
-import {libraryRequest,parseLibraryReservations,parseLibrarySeats,reservationQuery,resolveSeatTime} from '../src/providers/library.ts'
+import {libraryRequest,parseLibraryFloors,parseLibraryReservations,parseLibrarySeats,reservationQuery,resolveSeatTime} from '../src/providers/library.ts'
+import {libraryFloorPageScript} from '../src/providers/library-floor-page.ts'
+import {LIBRARY_ORIGIN} from '../src/shared/library.ts'
+
+it('reads displayed floor counts and the corresponding seat-query IDs from the official homepage cards',()=>{
+  const names=['3F-North','4F','5F','7F','8F','10F']
+  const cards=names.map((name,index)=>({
+    __vue__:{$props:{region:{id:index+1}}},
+    querySelector:(selector:string)=>({textContent:({
+      ':scope > .title':name, '.left .txt':String(index), '.right .txt':'56'
+    } as Record<string,string>)[selector]})
+  }))
+  const campus={
+    querySelector:()=>({firstChild:{textContent:' SIP Campus '}}),
+    querySelectorAll:()=>cards
+  }
+  const document={querySelectorAll:()=>[campus]}
+  const data=runInNewContext(libraryFloorPageScript,{document,location:{origin:LIBRARY_ORIGIN,hash:'#/ic/home'}})
+  const floors=parseLibraryFloors(data)
+  assert.equal(floors.length,names.length)
+  assert.deepEqual(floors[0],{key:'SIP Campus/1/3F-North',optionKey:'SIP Campus/3F-North',campus:'SIP Campus',name:'3F-North',id:1,free:0,total:56})
+  assert.equal(floors[5].free,5)
+  assert.equal(runInNewContext(libraryFloorPageScript,{location:{origin:LIBRARY_ORIGIN,hash:'#/ic/userinfo'}}),null)
+})
 
 it('uses the official beginDate/pageNum names for personal reservation history',()=>{
   const params=reservationQuery('2026-11-17',2)

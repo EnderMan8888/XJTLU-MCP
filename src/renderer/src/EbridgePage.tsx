@@ -12,7 +12,7 @@ const views: {key:EbridgeView; label:string; heading:string; source:string}[] = 
   {key:'grades',label:'成绩查询',heading:'成绩查询',source:'Academic Records'}
 ]
 
-export function EbridgePage({state, api, action, run, onAccount}: {state:EbridgeState; api:EbridgeBridge; action:boolean; run:(operation:()=>Promise<void>)=>Promise<void>; onAccount:()=>void}): React.JSX.Element {
+export function EbridgePage({state, api, action, run, autoRelogin, onAccount}: {state:EbridgeState; api:EbridgeBridge; action:boolean; autoRelogin:boolean; run:(operation:()=>Promise<void>)=>Promise<void>; onAccount:()=>void}): React.JSX.Element {
   const [view, setView] = useState<EbridgeView>('courses')
   const [search, setSearch] = useState('')
   const [date, setDate] = useState('')
@@ -21,6 +21,7 @@ export function EbridgePage({state, api, action, run, onAccount}: {state:Ebridge
   const [confirm, setConfirm] = useState(false)
   const busy = action || state.phase === 'authenticating' || state.phase === 'loading' || state.grades.loading
   const loginAction = schoolLoginAction(state.phase)
+  const canReadGrades = state.phase === 'connected' || autoRelogin && state.phase === 'expired'
   const query = search.trim().toLowerCase()
   const semesters = [...new Set(state.courses.map(c => c.semester).filter(Boolean))]
   const courses = state.courses.filter(c => (!semester || c.semester === semester) && `${c.code} ${c.title}`.toLowerCase().includes(query))
@@ -34,7 +35,7 @@ export function EbridgePage({state, api, action, run, onAccount}: {state:Ebridge
   const current = views.find(v => v.key === view)!
   return <>
     <div className="heading"><div><div className="eyebrow">EBRIDGE · ACADEMIC INFORMATION</div><h1>课程、课表、考试与成绩</h1><p>从 eBridge 读取教务信息，使用首页统一保存的学校账号。</p></div><div className="ams-icon">eB</div></div>
-    <section className="connection card"><div className="connection-top"><div><span className={`status status-${state.phase}`}><span />{phases[state.phase]}</span><h2>eBridge 连接</h2><p>{state.message}</p></div><div className="actions"><button disabled={!api || busy} onClick={() => state.phase === 'credentials-required' ? onAccount() : void run(() => loginAction ? api.showLogin() : api.connect())}>{loginAction ?? (state.phase === 'credentials-required' ? '设置学校账号' : '连接 eBridge')}</button><button className="primary" disabled={!api || busy || state.phase === 'manual-login-required'} onClick={() => void run(() => view === 'grades' && state.phase === 'connected' ? api.loadGrades() : api.refresh())}>{busy ? '正在读取…' : view === 'grades' ? '查询 / 刷新成绩' : '刷新教务信息'}</button></div></div><div className="connection-bottom"><span>◈ 首页统一管理账号</span><span>◈ 学校原始教务信息与成绩</span></div></section>
+    <section className="connection card"><div className="connection-top"><div><span className={`status status-${state.phase}`}><span />{phases[state.phase]}</span><h2>eBridge 连接</h2><p>{state.message}</p></div><div className="actions"><button disabled={!api || busy} onClick={() => state.phase === 'credentials-required' ? onAccount() : void run(() => loginAction ? api.showLogin() : api.connect())}>{loginAction ?? (state.phase === 'credentials-required' ? '设置学校账号' : '连接 eBridge')}</button><button className="primary" disabled={!api || busy || state.phase === 'manual-login-required'} onClick={() => void run(() => view === 'grades' && canReadGrades ? api.loadGrades() : api.refresh())}>{busy ? '正在读取…' : view === 'grades' ? '查询 / 刷新成绩' : '刷新教务信息'}</button></div></div><div className="connection-bottom"><span>◈ 首页统一管理账号</span><span>◈ 学校原始教务信息与成绩</span></div></section>
     <section className="card ebridge-cache-setting" aria-labelledby="ebridge-cache-title">
       <label id="ebridge-cache-title">
         <input type="checkbox" checked={state.localCache.enabled} disabled={!api || action} aria-describedby="ebridge-cache-description" onChange={event => {

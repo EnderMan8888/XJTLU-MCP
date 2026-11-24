@@ -13,9 +13,10 @@ import { initialLibraryState,type LibraryState } from '../../shared/library'
 import { McpPage } from './McpPage'
 import { LmcPage } from './LmcPage'
 import { initialLmcState, type LmcState } from '../../shared/lmc'
+import { SCHOOL_SERVICES, type AutoReloginSettings, type SchoolService } from '../../shared/auto-relogin'
 
 type Page = 'home' | 'account' | 'ams' | 'ebridge' | 'library' | 'lmc' | 'mcp'
-const labels: Record<Page, string> = { home: '首页', account: '账号与登录', ams: 'AMS 出勤', ebridge: 'eBridge 教务', library:'图书馆座位', lmc: 'Learning Mall Core', mcp: 'Agent 连接' }
+const labels: Record<Page, string> = { home: '首页', account: '账号与设置', ams: 'AMS 出勤', ebridge: 'eBridge 教务', library:'图书馆座位', lmc: 'Learning Mall Core', mcp: 'Agent 连接' }
 
 export function App(): React.JSX.Element {
   const [page, setPage] = useState<Page>('home')
@@ -25,6 +26,9 @@ export function App(): React.JSX.Element {
   const [library,setLibrary]=useState<LibraryState>(initialLibraryState)
   const [lmc, setLmc] = useState<LmcState>(initialLmcState)
   const [account, setAccount] = useState<CredentialStatus | null>(null)
+  const [autoRelogin, setAutoRelogin] = useState<AutoReloginSettings | null>(null)
+  const [savingRelogin, setSavingRelogin] = useState(false)
+  const [reloginError, setReloginError] = useState('')
   const [action, setAction] = useState(false)
   const [error, setError] = useState('')
   const api = window.campus
@@ -42,6 +46,8 @@ export function App(): React.JSX.Element {
     void api.ebridge.getState().then((state) => { if (live) setEbridge(state) }).catch(() => { if (live) setError('无法读取 eBridge 状态。') })
     void api.ams.getState().then((state) => { if (live) setAms(state) }).catch(() => { if (live) setError('无法读取 AMS 状态。') })
     void api.account.getStatus().then((state) => { if (live) setAccount(state) }).catch(() => { if (live) setError('无法读取学校账号状态。') })
+    void api.settings.getAutoRelogin().then((settings) => { if (live) setAutoRelogin(settings) })
+      .catch(() => { if (live) setReloginError('无法读取自动重登设置。') })
     return () => { live = false; stopAms(); stopAccount(); stopEbridge(); stopLibrary(); stopLmc() }
   }, [api])
 
@@ -50,6 +56,13 @@ export function App(): React.JSX.Element {
     try { await operation() } catch { setError('操作未能完成，请重试。') } finally { setAction(false) }
   }
   const navigate = (target: Page): void => { setError(''); setPage(target); pageScroll.current?.scrollTo(0, 0) }
+  const saveAutoRelogin = async (service: SchoolService, enabled: boolean): Promise<void> => {
+    setSavingRelogin(true)
+    setReloginError('')
+    try { setAutoRelogin(await api.settings.setAutoRelogin(service, enabled)) }
+    catch { setReloginError('设置保存失败，请重试。') }
+    finally { setSavingRelogin(false) }
+  }
   const modules = ams.moduleSnapshot
   const schoolConnections = [
     { page: 'ams', name: 'AMS', state: ams, showLogin: api?.ams.showLogin },
@@ -88,7 +101,7 @@ export function App(): React.JSX.Element {
           <TodayCourses ebridge={ebridge} ams={ams} busy={action||!api} onAccount={()=>navigate('account')} onRefresh={()=>void run(async()=>{await Promise.all([api.ebridge.refresh(),api.ams.refresh()])})}/>
           <div className="home-section-title"><h2>功能区</h2><span>4 项学校服务已接入</span></div>
           <div className="feature-grid">
-            <button type="button" className="feature-card card" onClick={() => navigate('account')}><span className="feature-icon account-icon">◈</span><span className="feature-status">{account ? account.saved ? '已保存学校账号' : '尚未设置' : '检查中'}</span><h2>账号与登录</h2><p>在本机加密保存学校账号，为已接入的服务提供自动登录。</p><span className="feature-link">{account?.username ? `${account.username} · 管理账号` : '设置学校账号'} <span>↗</span></span></button>
+            <button type="button" className="feature-card card" onClick={() => navigate('account')}><span className="feature-icon account-icon">◈</span><span className="feature-status">{account ? account.saved ? '已保存学校账号' : '尚未设置' : '检查中'}</span><h2>{labels.account}</h2><p>在本机加密保存学校账号，为已接入的服务提供自动登录。</p><span className="feature-link">{account?.username ? `${account.username} · 管理账号` : '设置学校账号'} <span>↗</span></span></button>
             <button type="button" className="feature-card card" onClick={() => navigate('ams')}><span className="feature-icon">▦</span><span className={`feature-status ${ams.phase === 'connected' ? 'green' : ''}`}>{phases[ams.phase]}</span><h2>AMS 出勤</h2><p>查看 Module 课程列表、每门课的签到率，以及近期课表。</p><span className="feature-link">{modules ? `${modules.modules.length} 门课程 · ${modules.term.academicYear} ${modules.term.semester}` : '进入 AMS'} <span>↗</span></span></button>
             <button type="button" className="feature-card card" onClick={() => navigate('ebridge')}><span className="feature-icon">▤</span><span className={`feature-status ${ebridge.phase === 'connected' ? 'green' : ''}`}>{phases[ebridge.phase]}</span><h2>eBridge 教务</h2><p>查看课程、课表、考试安排与学校公布的成绩。</p><span className="feature-link">{ebridge.coursesAt || ebridge.timetableAt || ebridge.examsAt ? `${ebridge.courses.length} 门课程 · ${ebridge.exams.length} 场考试` : '进入 eBridge'} <span>↗</span></span></button>
             <button type="button" className="feature-card card" onClick={()=>navigate('library')}><span className="feature-icon library-icon">▥</span><span className={`feature-status ${library.booking.phase==='connected'?'green':''}`}>{library.booking.phase==='connected'?'已连接学校账号':'选座预约'}</span><h2>图书馆座位</h2><p>选择具体座位和时段，确认后提交图书馆预约。</p><span className="feature-link">{library.fetchedAt?`${library.floors.length} 个楼层 · 选座预约`:'进入图书馆'}<span>↗</span></span></button>
@@ -98,16 +111,28 @@ export function App(): React.JSX.Element {
         </>}
 
         {page === 'account' && <>
-          <div className="heading"><div><div className="eyebrow">CAMPUS ACCOUNT</div><h1>账号与登录</h1><p>学校账号在这里统一管理，AMS 等服务按需使用。</p></div><div className="ams-icon">◈</div></div>
+          <div className="heading"><div><div className="eyebrow">CAMPUS ACCOUNT</div><h1>{labels.account}</h1><p>学校账号在这里统一管理，AMS 等服务按需使用。</p></div><div className="ams-icon">◈</div></div>
           <section className="card account-card"><div className="account-intro"><h2>学校统一认证账号</h2><p>账号密码使用 Windows 的加密能力保存在本机，供程序在学校官方页面自动登录。</p></div><CredentialPanel api={api?.account} disabled={false} onError={setError} /></section>
+          <section className="card account-card auto-relogin" aria-labelledby="auto-relogin-heading">
+            <div className="account-intro">
+              <h2 id="auto-relogin-heading">会话过期后自动重登</h2>
+              <p>开启后，需要在线读取时会用已保存的学校账号恢复连接。普通课表查询仍优先读取缓存。</p>
+            </div>
+            {SCHOOL_SERVICES.map(service => <label key={service} className="auto-relogin-row">
+              <span>{labels[service]}</span>
+              <input type="checkbox" role="switch" checked={autoRelogin?.[service] ?? false}
+                disabled={!autoRelogin || savingRelogin} onChange={event => void saveAutoRelogin(service, event.target.checked)} />
+            </label>)}
+            {reloginError && <div className="notice error" role="alert">{reloginError}</div>}
+          </section>
           <div className="account-explanation"><h2>自动登录怎样工作</h2><ol><li>优先恢复仍有效的学校会话。</li><li>需要重新登录时，程序填写已保存的账号密码并点击学校的登录按钮。</li><li>自动登录失败后，可点击对应模块的「手动登录」继续。</li><li>遇到验证码、二次验证或页面确认时，打开官方窗口提醒你完成。</li></ol><p>可以随时更新或删除保存的信息。断开某个服务不会删除这里的学校账号。</p></div>
         </>}
 
         {page === 'ams' && <AmsPage state={ams} ebridge={ebridge} refresh={async()=>{await Promise.all([api.ams.refresh(),api.ebridge.refresh()])}} api={api?.ams} action={action} run={run} onAccount={() => navigate('account')} />}
-        {page === 'ebridge' && <EbridgePage state={ebridge} api={api?.ebridge} action={action} run={run} onAccount={() => navigate('account')} />}
-        {page==='library'&&<LibraryPage state={library} api={api?.library} onAccount={()=>navigate('account')}/>}
+        {page === 'ebridge' && <EbridgePage state={ebridge} api={api?.ebridge} action={action} run={run} autoRelogin={autoRelogin?.ebridge ?? false} onAccount={() => navigate('account')} />}
+        {page==='library'&&<LibraryPage state={library} api={api?.library} autoRelogin={autoRelogin?.library ?? false} onAccount={()=>navigate('account')}/>}
         {page === 'mcp' && <McpPage api={api?.mcp} />}
-        {page === 'lmc' && <LmcPage state={lmc} api={api?.lmc} onAccount={() => navigate('account')} />}
+        {page === 'lmc' && <LmcPage state={lmc} api={api?.lmc} autoRelogin={autoRelogin?.lmc ?? false} onAccount={() => navigate('account')} />}
       </div>
       </div>
     </main>

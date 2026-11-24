@@ -129,7 +129,7 @@ export class LmcService implements AccountConsumer {
         const cg = this.credentialGeneration
         const saved = await this.account.read().catch(() => null)
         if (!this.valid(g, win) || cg !== this.credentialGeneration || !isCredentialPage(win.webContents.getURL())) return
-        if (!saved) { this.stopWatch(); this.update({ phase: 'credentials-required', message: '请先在首页“账号与登录”保存学校账号。' }); return }
+        if (!saved) { this.stopWatch(); this.update({ phase: 'credentials-required', message: '请先在“账号与设置”保存学校账号。' }); return }
         this.submitted = true
         const task = win.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: buildAutomaticLoginScript(saved, `lmc:${g}:${cg}`) }])
         this.automatic = task

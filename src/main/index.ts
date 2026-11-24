@@ -23,6 +23,9 @@ import { inspectDeepseekAgent, installDeepseekPlugin, saveDeepseekKey, uninstall
 import { inspectKimiAgent, installKimiCode, uninstallKimiCode } from './kimi-code'
 import { AGENT_CLIENTS } from '../shared/mcp'
 import { LmcService } from './lmc-service'
+import { AutoReloginStore } from '../infrastructure/auto-relogin-store'
+import { AutoRelogin } from '../services/auto-relogin'
+import { SCHOOL_SERVICES, type SchoolService } from '../shared/auto-relogin'
 import { z } from 'zod'
 import trayIcon from './assets/tray.ico?asset'
 
@@ -131,11 +134,36 @@ else {
     account.subscribe(library)
     lmc = new LmcService(state => { if (main && !main.isDestroyed()) main.webContents.send('lmc:state', state) }, account)
     account.subscribe(lmc)
-    const queries = new CampusQueries({ ams, ebridge, library, lmc })
+    const reloginSettings = new AutoReloginStore(userData)
+    await reloginSettings.load()
+    const connections = {
+      ams: { phase: () => ams.getState().phase, connect: () => ams.reconnect(false) },
+      ebridge: { phase: () => ebridge.getState().phase, connect: () => ebridge.connect() },
+      library: { phase: () => library.getState().booking.phase, connect: () => library.connect() },
+      lmc: { phase: () => lmc.getState().phase, connect: () => lmc.connect() }
+    }
+    const relogin = new AutoRelogin(connections, service => reloginSettings.enabled(service))
+    const queries = new CampusQueries({ ams, ebridge, library, lmc }, Date.now, relogin)
     account.subscribe({
-      cancelAccountAutomation: async () => { queries.cancelPending() },
+      cancelAccountAutomation: async () => { relogin.cancelPending(); queries.cancelPending() },
       accountChanged: (previous, current) => { if (previous.username && current.username && previous.username !== current.username) queries.invalidate() }
     })
+    function requireConnection(service: SchoolService): never {
+      const phase = connections[service].phase()
+      if (phase === 'loading' || phase === 'authenticating') throw new Error('学校连接正在恢复，请稍后重试。')
+      if (phase === 'verification-required') throw new Error('请在学校窗口完成验证后重试。')
+      if (phase === 'manual-login-required') throw new Error('请点击手动登录，在学校窗口登录后重试。')
+      throw new Error('请连接学校账号后重试。')
+    }
+    async function readSchool<T>(service: SchoolService, read: () => Promise<T>, afterReconnect = read): Promise<T> {
+      const result = await relogin.read(service, async () => ({ value: await read() }), async () => ({ value: await afterReconnect() }))
+      return result ? result.value : requireConnection(service)
+    }
+    async function refreshSchool(service: SchoolService, read: () => Promise<void>, explicitRefresh: () => Promise<void>): Promise<void> {
+      const phase = connections[service].phase()
+      if (phase !== 'connected' && !(phase === 'expired' && reloginSettings.enabled(service))) return explicitRefresh()
+      await readSchool(service, read, async () => {})
+    }
     mcp = new McpService(queries, new McpKeyStore(app.getPath('userData'), {
       available: () => safeStorage.isAsyncEncryptionAvailable(),
       encrypt: value => safeStorage.encryptStringAsync(value),
@@ -176,15 +204,26 @@ else {
       kimi: { inspect: inspectKimiAgent, install: installKimiCode, uninstall: uninstallKimiCode }
     }
     const handlers = {
+      'settings:get-auto-relogin': () => reloginSettings.get(),
+      'settings:set-auto-relogin': (value: unknown) => {
+        const { service, enabled } = z.object({ service: z.enum(SCHOOL_SERVICES), enabled: z.boolean() }).strict().parse(value)
+        return reloginSettings.set(service, enabled)
+      },
       'lmc:get-state': () => lmc.getState(),
       'lmc:connect': () => lmc.connect(),
-      'lmc:refresh': () => lmc.refresh(),
+      'lmc:refresh': () => refreshSchool('lmc', () => lmc.refresh(), () => lmc.refresh()),
       'lmc:show-login': () => lmc.showLogin(),
       'lmc:disconnect': () => lmc.disconnect(),
-      'lmc:load-course': (id: unknown) => lmc.loadCourse(id),
-      'lmc:load-folder': (id: unknown) => lmc.loadFolder(id),
-      'lmc:notifications': (more: unknown) => lmc.loadNotifications(z.boolean().parse(more)),
-      'lmc:download': (id: unknown) => lmc.download(id),
+      'lmc:load-course': (id: unknown) => readSchool('lmc', () => lmc.loadCourse(id)),
+      'lmc:load-folder': (id: unknown) => readSchool('lmc', () => lmc.loadFolder(id)),
+      'lmc:notifications': (value: unknown) => {
+        const more = z.boolean().parse(value)
+        return readSchool('lmc', () => lmc.loadNotifications(more))
+      },
+      'lmc:download': async (id: unknown) => {
+        if (!await relogin.ensureConnected('lmc')) return requireConnection('lmc')
+        return lmc.download(id)
+      },
       'lmc:cancel-download': (id: unknown) => lmc.cancelDownload(id),
       'lmc:reveal-download': (id: unknown) => lmc.revealDownload(id),
       'lmc:open-source': (value: unknown) => lmc.openSource(z.union([z.object({ kind: z.literal('home') }).strict(), z.object({ kind: z.enum(['course', 'activity', 'notification']), id: z.string().min(1).max(200) }).strict()]).parse(value)),
@@ -215,19 +254,19 @@ else {
       'mcp:rotate-key': () => mcp.rotateKey(),
       'ams:get-state': () => ams.getState(),
       'ams:open-login': () => ams.openLogin(),
-      'ams:refresh': () => ams.refresh(),
+      'ams:refresh': () => refreshSchool('ams', () => ams.refresh(true, false), () => ams.refresh()),
       'ams:clear-session': () => ams.clearSession(),
       'ams:open-source': () => ams.openSource(),
       'ams:open-module-source': () => ams.openModuleSource(),
       'ams:reconnect': () => ams.reconnect(),
       'ams:show-login': () => ams.showLogin(),
       'ams:set-term': (value: unknown) => ams.setTerm(value),
-      'ams:load-schedule-attendance': (value:unknown) => ams.loadScheduleAttendance(value,ebridge.getState()),
+      'ams:load-schedule-attendance': (value: unknown) => readSchool('ams', () => ams.loadScheduleAttendance(value, ebridge.getState())),
       'ebridge:get-state': () => ebridge.getState(),
       'ebridge:connect': () => ebridge.connect(),
-      'ebridge:refresh': () => ebridge.refresh(),
+      'ebridge:refresh': () => refreshSchool('ebridge', () => ebridge.refresh(false), () => ebridge.refresh()),
       'ebridge:local-cache': (value: unknown) => ebridge.setLocalCache(z.boolean().parse(value)),
-      'ebridge:grades': () => ebridge.loadGrades(),
+      'ebridge:grades': () => readSchool('ebridge', () => ebridge.loadGrades()),
       'ebridge:grade-source': (value: unknown) => ebridge.openGradeSource(z.enum(['components', 'records']).parse(value)),
       'ebridge:show-login': () => ebridge.showLogin(),
       'ebridge:open-source': (value: unknown) => { if (value !== 'courses' && value !== 'timetable' && value !== 'exams' && value !== 'grades') throw new Error('Unsupported view'); return ebridge.openSource(value) },
@@ -236,7 +275,7 @@ else {
       'library:refresh': () => library.refresh(),
       'library:connect': () => library.connect(),
       'library:show-login': () => library.showLogin(),
-      'library:search': (value:unknown) => library.searchSeats(value),
+      'library:search': (value: unknown) => readSchool('library', () => library.searchSeats(value)),
       'library:prepare': (value:unknown) => library.prepareBooking(value),
       'library:submit': (value:unknown) => { if(!value||typeof value!=='object'||!('id'in value)||!('acceptedNotice'in value)||!('captcha'in value))throw new Error('Unsupported booking');return library.submitBooking(value.id,value.acceptedNotice,value.captcha) },
       'library:agent-review': (id:unknown) => library.agentBookings.review(z.uuid().parse(id)),
@@ -246,7 +285,7 @@ else {
         return library.agentBookings.submit(requestId,draftId,acceptedNotice,captcha)
       },
       'library:captcha': () => library.getCaptcha(),
-      'library:reservations': () => library.getReservations(),
+      'library:reservations': () => readSchool('library', () => library.getReservations()),
       'library:open-source': () => library.openSource(),
       'account:get-status': () => account.status(),
       'account:save': (value: unknown) => credentialAction(() => account.save(value)),
