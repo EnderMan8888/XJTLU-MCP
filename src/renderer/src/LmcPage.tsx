@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { schoolLoginAction } from '../../shared/ams'
-import { isSignInNotice, type LmcBridge, type LmcDownload, type LmcNotification, type LmcState } from '../../shared/lmc'
+import { isSignInNotice, LMC_SUBMISSION_TYPES, type LmcBridge, type LmcDownload, type LmcNotification, type LmcState } from '../../shared/lmc'
 import { phases, updatedAt } from './presentation'
 import { notificationContent } from './lmc-notifications'
+import { ActivityResult, CourseGrades } from './LmcGrades'
 
-const activityLabels: Record<string, string> = { resource: '文件', folder: '文件夹', assign: '作业', forum: '讨论 / 公告', quiz: '测验', page: '页面', url: '外部链接', lti: '教学工具', checklist: '清单', bigbluebuttonbn: '在线课堂', moodleoverflow: '问答' }
+const activityLabels: Record<string, string> = { resource: '文件', folder: '文件夹', assign: '作业', forum: '讨论 / 公告', quiz: '测验', workshop: '互评', page: '页面', url: '外部链接', lti: '教学工具', checklist: '清单', bigbluebuttonbn: '在线课堂', moodleoverflow: '问答' }
 const bytes = (value: number): string => value >= 1_048_576 ? `${(value / 1_048_576).toFixed(1)} MB` : value >= 1024 ? `${(value / 1024).toFixed(0)} KB` : `${value} B`
 const sourceLabels: Record<string, string> = { mod_forum: '课程讨论', mod_assign: '作业通知', mod_quiz: '测验通知', moodle: '系统通知' }
 const fileLabels: Record<string, string> = { pdf: 'PDF', powerpoint: 'PowerPoint', document: '文档', archive: '压缩包', markup: 'HTML', spreadsheet: '表格' }
@@ -15,6 +16,8 @@ const courseNameOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'b
 export function LmcPage({ state, api, autoRelogin, onAccount }: { state: LmcState; api: LmcBridge | undefined; autoRelogin: boolean; onAccount: () => void }): React.JSX.Element {
   const loginAction = schoolLoginAction(state.phase)
   const [view, setView] = useState<'courses' | 'notifications'>('courses')
+  const [courseView, setCourseView] = useState<'materials' | 'grades'>('materials')
+  const [expandedResult, setExpandedResult] = useState<string | null>(null)
   const [selected, setSelected] = useState('')
   const [search, setSearch] = useState('')
   const [courseSort, setCourseSort] = useState<'recent' | 'name'>(() => { try { return localStorage.getItem(courseSortKey) === 'name' ? 'name' : 'recent' } catch { return 'recent' } })
@@ -34,11 +37,32 @@ export function LmcPage({ state, api, autoRelogin, onAccount }: { state: LmcStat
   if (courseSort === 'name') courses.sort((a, b) => courseNameOrder.compare(a.title, b.title))
   const course = state.courses.find(course => course.id === selected)
   const module = course ? state.modules[course.id] : null
+  const gradeReport = course ? state.courseGrades[course.id] : undefined
+  const gradedActivities = new Set(gradeReport?.data?.rows.map(row => row.activityId))
   const sections = [...new Set(module?.activities.map(activity => activity.section) ?? [])]
   const downloadBusy = state.downloads.some(item => item.phase === 'preparing' || item.phase === 'downloading')
   const notices = state.notifications.filter(item => !hideSignIn || !isSignInNotice(item.title))
   const hiddenNotices = state.notifications.length - notices.length
-  const selectCourse = (id: string): void => { setSelected(id); setExpandedFolders(new Set()); if (api && !state.modules[id]?.fetchedAt) void run(() => api.loadCourse(id)) }
+  const loadCourseView = (id: string, next: 'materials' | 'grades'): void => {
+    if (!api || !canRead) return
+    if (next === 'grades' && !state.courseGrades[id]?.fetchedAt) void run(() => api.loadCourseGrades(id))
+    if (next === 'materials' && !state.modules[id]?.fetchedAt) void run(() => api.loadCourse(id))
+  }
+  const selectCourse = (id: string): void => {
+    setSelected(id)
+    setExpandedFolders(new Set())
+    setExpandedResult(null)
+    loadCourseView(id, courseView)
+  }
+  const selectCourseView = (id: string, next: 'materials' | 'grades'): void => {
+    setCourseView(next)
+    loadCourseView(id, next)
+  }
+  const toggleResult = (id: string): void => {
+    if (expandedResult === id) { setExpandedResult(null); return }
+    setExpandedResult(id)
+    if (api && canRead && !state.activityResults[id]?.fetchedAt) void run(() => api.loadActivityResult(id))
+  }
   const toggleFolder = (id: string): void => {
     const next = new Set(expandedFolders)
     if (next.has(id)) next.delete(id)
@@ -46,7 +70,7 @@ export function LmcPage({ state, api, autoRelogin, onAccount }: { state: LmcStat
     setExpandedFolders(next)
   }
   return <>
-    <div className="heading"><div><div className="eyebrow">LEARNING MALL CORE</div><h1>课程资料与通知</h1><p>查看 Module 内容，下载学校提供的原文件。</p></div><div className="ams-icon lmc-icon">LM</div></div>
+    <div className="heading"><div><div className="eyebrow">LEARNING MALL CORE</div><h1>课程资料与通知</h1><p>查看课程资料、成绩和通知，下载学校提供的原文件。</p></div><div className="ams-icon lmc-icon">LM</div></div>
     <section className="connection card"><div className="connection-top"><div><span className={`status status-${state.phase}`}><span />{phases[state.phase]}</span><h2>LMC 连接</h2><p>{state.message}</p></div><div className="actions"><button disabled={disabled} onClick={() => { if (!api) return; if (state.phase === 'credentials-required') onAccount(); else void run(() => loginAction ? api.showLogin() : api.connect()) }}>{loginAction ?? (state.phase === 'credentials-required' ? '设置学校账号' : connected ? '更新连接' : '连接 LMC')}</button><button className="primary" disabled={disabled || !canRead} onClick={() => { if (api) void run(() => api.refresh()) }}>{connecting ? '正在读取…' : '刷新课程与通知'}</button></div></div><div className="connection-bottom"><span>◈ 复用首页学校账号</span><span>◈ 文件直接下载，不提取文档内容</span></div></section>
     {error && <div className="notice error" role="alert">{error}</div>}
     <div className="view-tabs" role="group" aria-label="Learning Mall 视图"><button className={view === 'courses' ? 'active' : ''} aria-pressed={view === 'courses'} onClick={() => setView('courses')}>课程与资料</button><button className={view === 'notifications' ? 'active' : ''} aria-pressed={view === 'notifications'} onClick={() => setView('notifications')}>Notification{state.unreadCount !== null ? ` · ${state.unreadCount} 条未读` : ''}</button></div>
@@ -59,8 +83,23 @@ export function LmcPage({ state, api, autoRelogin, onAccount }: { state: LmcStat
         {!state.coursesAt ? <div className="lmc-empty">连接后读取课程列表。</div> : !courses.length ? <div className="lmc-empty">{query ? '没有匹配课程。' : '学校未返回课程。'}</div> : <div className="lmc-course-list">{courses.map(item => <button key={item.id} className={selected === item.id ? 'selected' : ''} disabled={disabled || !canRead} onClick={() => selectCourse(item.id)}><strong>{item.title}</strong>{item.shortName && <small>{item.shortName}</small>}</button>)}</div>}
         <div className="lmc-updated">上次更新：{updatedAt(state.coursesAt)}</div>
       </section><section className="card lmc-module">
-        {!course ? <div className="empty"><div className="empty-icon">▤</div><h3>选择一门课程</h3><p>展开 Module 资料和文件夹，选择文件下载。</p></div> : <>
-          <div className="lmc-panel-heading"><div><h2>{course.title}</h2><small>{course.shortName}</small></div><div className="actions"><button disabled={disabled || !canRead} onClick={() => { if (api) void run(() => api.loadCourse(course.id)) }}>刷新资料</button><button className="text-button" disabled={disabled || !connected} onClick={() => { if (api) void run(() => api.openSource({ kind: 'course', id: course.id })) }}>学校原页 ↗</button></div></div>
+        {!course ? <div className="empty"><div className="empty-icon">▤</div><h3>选择一门课程</h3></div> : <>
+          <div className="lmc-panel-heading">
+            <div><h2>{course.title}</h2><small>{course.shortName}</small></div>
+            <div className="actions">
+              <button disabled={disabled || !canRead} onClick={() => {
+                if (api) void run(() => courseView === 'grades' ? api.loadCourseGrades(course.id) : api.loadCourse(course.id))
+              }}>{courseView === 'grades' ? '刷新成绩' : '刷新资料'}</button>
+              <button className="text-button" disabled={disabled || !connected} onClick={() => {
+                if (api) void run(() => api.openSource({ kind: courseView === 'grades' ? 'grades' : 'course', id: course.id }))
+              }}>学校原页 ↗</button>
+            </div>
+          </div>
+          <div className="view-tabs lmc-course-tabs" role="group" aria-label="课程视图">
+            <button className={courseView === 'materials' ? 'active' : ''} aria-pressed={courseView === 'materials'} disabled={busy} onClick={() => selectCourseView(course.id, 'materials')}>课程资料</button>
+            <button className={courseView === 'grades' ? 'active' : ''} aria-pressed={courseView === 'grades'} disabled={busy} onClick={() => selectCourseView(course.id, 'grades')}>Grades</button>
+          </div>
+          {courseView === 'grades' ? <CourseGrades snapshot={gradeReport} /> : <>
           {module?.issue && <div className="notice" role="status">{module.issue}</div>}
           {module?.loading || busy && !module?.fetchedAt ? <div className="empty"><h3>正在读取课程资料…</h3></div> : !module?.fetchedAt ? <div className="empty"><h3>课程资料尚未读取</h3></div> : !module.activities.length ? <div className="empty"><h3>课程页面没有可显示的活动</h3></div> : sections.map(section => <section className="lmc-section" key={section}><h3>{section}</h3>{module.activities.filter(activity => activity.section === section).map(activity => <div key={activity.id} className="lmc-activity-group"><div className="lmc-activity"><span className={`lmc-kind ${activity.type === 'folder' ? 'is-folder' : ''}`}>{activityLabels[activity.type] ?? activity.type}</span>
             <div className="lmc-activity-name">
@@ -69,12 +108,21 @@ export function LmcPage({ state, api, autoRelogin, onAccount }: { state: LmcStat
                 <span>开放 {activity.assignmentDates?.opens ?? '未读取到'}</span>
                 <span>截止 {activity.assignmentDates?.due ?? '未读取到'}</span>
               </span>}
+              {state.activityResults[activity.id]?.data?.submissionStatus && <small>提交状态 · {state.activityResults[activity.id].data?.submissionStatus}</small>}
               {activity.fileType && <small>{fileLabels[activity.fileType] ?? activity.fileType.toUpperCase()}</small>}
             </div>
-            <div className="actions">{activity.type === 'folder' ? <button disabled={disabled || !canRead} onClick={() => toggleFolder(activity.id)}>{expandedFolders.has(activity.id) ? '收起' : '查看文件'}</button> : activity.downloadable ? <button className="primary" disabled={disabled || !canRead || downloadBusy} onClick={() => { if (api) void run(() => api.download(activity.id)) }}>下载</button> : null}<button className="text-button" disabled={disabled || !connected} onClick={() => { if (api) void run(() => api.openSource({ kind: 'activity', id: activity.id })) }}>学校原页 ↗</button></div></div>
+            <div className="actions">{activity.type === 'folder' ? <button disabled={disabled || !canRead} onClick={() => toggleFolder(activity.id)}>{expandedFolders.has(activity.id) ? '收起' : '查看文件'}</button> : activity.downloadable ? <button className="primary" disabled={disabled || !canRead || downloadBusy} onClick={() => { if (api) void run(() => api.download(activity.id)) }}>下载</button> : null}
+              {(LMC_SUBMISSION_TYPES.some(type => type === activity.type) || gradedActivities.has(activity.id)) && <button aria-expanded={expandedResult === activity.id}
+                disabled={busy || !canRead && !state.activityResults[activity.id]?.data && !gradedActivities.has(activity.id)}
+                onClick={() => toggleResult(activity.id)}>{expandedResult === activity.id ? '收起结果' : '成绩与提交'}</button>}
+              <button className="text-button" disabled={disabled || !connected} onClick={() => { if (api) void run(() => api.openSource({ kind: 'activity', id: activity.id })) }}>学校原页 ↗</button></div></div>
+            {expandedResult === activity.id && <ActivityResult snapshot={state.activityResults[activity.id]} report={gradeReport}
+              activityId={activity.id} type={activity.type} loading={busy || !!state.activityResults[activity.id]?.loading}
+              disabled={disabled || !canRead} onRefresh={() => { if (api) void run(() => api.loadActivityResult(activity.id, true)) }} />}
             {expandedFolders.has(activity.id) && <div className="lmc-folder">{module.folders[activity.id]?.issue && <div className="notice" role="status">{module.folders[activity.id].issue}<button className="text-button" disabled={disabled} onClick={() => { if (api) void run(() => api.loadFolder(activity.id)) }}>重试</button></div>}{module.folders[activity.id]?.loading ? <p>正在读取文件列表…</p> : !module.folders[activity.id]?.fetchedAt ? <p>文件列表尚未读取。</p> : !module.folders[activity.id].files.length ? <p>学校当前未提供文件。</p> : module.folders[activity.id].files.map(file => <div className="lmc-file" key={file.id}><div><strong>{file.name}</strong>{file.path !== file.name && <small>{file.path}</small>}</div><button disabled={disabled || !canRead || downloadBusy} onClick={() => { if (api) void run(() => api.download(file.id)) }}>下载{file.extension ? ` ${file.extension.toUpperCase()}` : ''}</button></div>)}</div>}
           </div>)}</section>)}
           <div className="lmc-updated">上次更新：{updatedAt(module?.fetchedAt ?? null)}</div>
+          </>}
         </>}
       </section></div>
     </>}

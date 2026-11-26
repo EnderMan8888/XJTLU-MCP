@@ -13,6 +13,9 @@ XJTLU-Library-Seat-Notifier/
 ams-credentials.json
 ebridge-cache.bin
 .ebridge-cache-*.tmp
+mail-archive-*.bin
+.mail-archive-*.tmp
+mail-archive-enabled
 mcp-access.bin
 mcp-access.bin.tmp
 *.log

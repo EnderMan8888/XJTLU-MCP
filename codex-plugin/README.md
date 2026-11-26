@@ -1,6 +1,6 @@
 # XJTLU-MCP · Codex 本机插件
 
-适用于与 XJTLU-MCP 运行在同一台 Windows 电脑上的 Codex。插件通过本机 MCP 服务使用全部 16 个工具。
+适用于与 XJTLU-MCP 运行在同一台 Windows 电脑上的 Codex。插件通过本机 MCP 服务发现当前工作台提供的工具。
 
 1. 打开 XJTLU-MCP。在「Agent 连接」开启服务，在 ChatGPT 卡片点击「安装」。插件版本随工作台版本同步。
 2. 完全退出并重开 ChatGPT，然后开启一个本地 Codex 会话。输入 `/mcp`，或直接问「用 XJTLU-MCP 检查连接状态，再查今天的课表」。

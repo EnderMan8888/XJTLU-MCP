@@ -27,7 +27,7 @@ export interface McpBridge {
   onState(listener: (state: McpStatus) => void): () => void
 }
 export const MCP_TOOLS = {
-  get_connection_status: 'AMS、eBridge、图书馆和 LMC 的连接与登录状态',
+  get_connection_status: 'AMS、eBridge、图书馆、LMC 和西浦邮箱的连接与登录状态',
   refresh_source: '刷新指定学校服务',
   get_modules: 'eBridge 当前学年的课程列表',
   get_timetable: '指定日期的课程、时间、教室和教学组',
@@ -42,6 +42,10 @@ export const MCP_TOOLS = {
   get_lmc_notification: '近四个月的 LMC 通知与公告附件',
   list_lmc_modules: 'LMC 当前可见的课程列表',
   get_module_contents: '课程目录、活动类型和文件夹内的文件',
-  download_lmc_file: '保存 LMC 资料和公告附件，可指定本机路径'
+  get_lmc_grades: 'LMC 个人课程成绩、活动成绩与提交状态',
+  download_lmc_file: '保存 LMC 资料和公告附件，可指定本机路径',
+  get_email_list: '分页读取西浦邮箱的收件箱或已发送邮件',
+  get_email_information: '按邮件 ID 或主题读取邮件正文',
+  send_email: '发送邮件，需先在桌面应用开启'
 } as const
 

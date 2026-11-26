@@ -1,0 +1,17 @@
+.view-tabs.lmc-course-tabs { margin: 0; padding: 15px 20px 0; }
+.lmc-grades-table { width: 100%; font-size: 12px; }
+.lmc-grades-table th, .lmc-grades-table td { padding: 11px 14px; white-space: normal; line-height: 1.5; overflow-wrap: anywhere; }
+.lmc-grades-table th:first-child { min-width: 140px; }
+.lmc-grades-table th[scope="row"] { color: #536783; }
+.lmc-grade-category, .lmc-grade-total { background: #f5f8fb; }
+.lmc-activity-result { margin-bottom: 12px; padding: 12px 14px; background: #f8fafd; border: 1px solid #e9edf4; border-radius: 8px; }
+.lmc-activity-result-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.lmc-activity-result-heading dl { display: flex; gap: 8px 20px; flex-wrap: wrap; margin: 0; font-size: 11px; }
+.lmc-activity-result-heading dl > div { display: flex; align-items: baseline; gap: 6px; }
+.lmc-activity-result-heading dt { color: #72819b; }
+.lmc-activity-result-heading dd { margin: 0; font-weight: 600; }
+.lmc-activity-result-heading > button { flex-shrink: 0; }
+.lmc-activity-result .table-scroll { margin-top: 10px; }
+.lmc-attempt-source { display: block; margin-top: 3px; color: #72819b; font-size: 10px; }
+.lmc-assessment-grades { margin-top: 12px; font-size: 12px; }
+.lmc-assessment-grades h4, .lmc-assessment-grades ul { margin: 6px 0; }

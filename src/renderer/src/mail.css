@@ -1,0 +1,50 @@
+.mail-list, .mail-reader { min-width: 0; overflow: hidden; }
+.mail-list-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.mail-list-footer button { font-size: 11px; padding: 9px 11px; }
+.mail-list-error { margin: 16px; }
+
+.mail-rows {
+  list-style: none;
+  margin: 0;
+  padding-top: 8px;
+}
+.mail-row {
+  display: grid;
+  width: 100%;
+  gap: 6px;
+}
+.mail-row-top, .mail-row-bottom { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.mail-row-top { justify-content: space-between; }
+.mail-sender, .mail-subject { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.mail-subject { font-weight: 500; }
+.mail-row time, .mail-attachment { flex-shrink: 0; color: #64748b; font-size: 10px; font-weight: 400; }
+.mail-unread { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #3f64c8; }
+
+.mail-reader-header > div { min-width: 0; }
+.mail-reader-header h2 { overflow-wrap: anywhere; }
+.mail-message-meta { display: grid; gap: 6px; margin: 10px 0 0; font-size: 12px; line-height: 1.55; }
+.mail-message-meta > div { display: grid; grid-template-columns: 3em minmax(0, 1fr); gap: 8px; }
+.mail-message-meta dt { color: #64748b; }
+.mail-message-meta dd { margin: 0; overflow-wrap: anywhere; }
+.mail-reader-header .mail-attachment { display: inline-block; margin-top: 8px; }
+.mail-body { padding: 20px; line-height: 1.75; overflow-wrap: anywhere; }
+.mail-body-text { white-space: pre-wrap; }
+.mail-body-html :where(p, ul, ol, dl, blockquote, pre, table) { margin: 0 0 .85em; }
+.mail-body-html :where(h1, h2, h3, h4, h5, h6) { margin: .8em 0 .45em; font-size: 1.1em; line-height: 1.45; }
+.mail-body-html > :first-child { margin-top: 0; }
+.mail-body-html :where(ul, ol) { padding-inline-start: 1.75em; }
+.mail-body-html :where(blockquote) { padding-inline-start: 12px; border-inline-start: 3px solid #d7dfed; color: #52617c; }
+.mail-body-html pre { overflow-x: auto; padding: 8px 10px; background: #f6f8fc; border-radius: 5px; }
+.mail-body-table, .mail-body-layout { overflow: auto; }
+.mail-body-table table, .mail-body-layout table { width: auto; max-width: 100%; border-collapse: collapse; }
+.mail-body-table :where(th, td), .mail-body-layout :where(th, td) { padding: 6px 8px; white-space: normal; color: inherit; background: none; }
+.mail-body-table :where(th, td) { border: 1px solid #e4e9f3; }
+.mail-body-layout :where(th, td) { padding: 0; border: 0; }
+.mail-body-link { color: #3c61a2; overflow-wrap: anywhere; }
+.mail-reader-error { padding: 0 20px 20px; color: #925656; }

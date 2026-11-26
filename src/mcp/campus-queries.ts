@@ -2,7 +2,7 @@ import type { AmsState, ConnectionPhase } from '../shared/ams.ts'
 import type { EbridgeState } from '../shared/ebridge.ts'
 import type { AgentBooking, LibraryReservation, LibrarySeat, LibraryState, SeatSearch, SeatSelection } from '../shared/library.ts'
 import type { ModuleAttendanceSnapshot } from '../shared/modules.ts'
-import { isSignInNotice, type LmcNotificationAttachment, type LmcNotificationRange, type LmcState } from '../shared/lmc.ts'
+import { isSignInNotice, LMC_SUBMISSION_TYPES, type LmcNotificationAttachment, type LmcNotificationRange, type LmcState } from '../shared/lmc.ts'
 import { academicTermOn, beijingDate } from '../shared/academic-calendar.ts'
 import { libraryNowWindow } from '../shared/library-time.ts'
 import { LibraryError } from '../providers/library.ts'
@@ -10,6 +10,8 @@ import { ebridgeTimetableForDate } from '../shared/ebridge-timetable.ts'
 import { amsRelativeDays, matchModuleAttendance, moduleAttendanceLabels } from '../shared/module-attendance.ts'
 import type { AutoRelogin } from '../services/auto-relogin.ts'
 import { LmcSavePathError } from '../infrastructure/lmc-save-path.ts'
+import { MailError } from '../providers/outlook-mail.ts'
+import type { MailListInput, MailLookup, MailState, OutgoingMail } from '../shared/mail.ts'
 
 export interface CampusSources {
   ams: { getState(): AmsState; refresh(userInitiated?: boolean, recover?: boolean): Promise<void>; loadScheduleAttendance(date: string, ebridge: EbridgeState): Promise<void> }
@@ -25,13 +27,21 @@ export interface CampusSources {
     getState(): LmcState
     refresh(): Promise<void>
     loadCourse(id: string): Promise<void>
+    loadCourseGrades(id: string): Promise<void>
+    loadActivityResult(id: string, refresh?: boolean): Promise<void>
     loadFolder(id: string): Promise<void>
     readNotificationRange(since: number): Promise<LmcNotificationRange>
     loadNotificationAttachments?(id: string): Promise<LmcNotificationAttachment[] | null>
     startDownload(id: string, savePath?: string, notificationId?: string): Promise<string | null>
   }
+  mail?: {
+    getState(): MailState
+    list(input: MailListInput): Promise<Record<string, unknown>>
+    get(input: MailLookup): Promise<Record<string, unknown>>
+    send(input: OutgoingMail): Promise<void>
+  }
 }
-export type CampusSource = keyof CampusSources
+export type CampusSource = Exclude<keyof CampusSources, 'mail'>
 export interface SeatWindowInput { floorId: number; date?: string; start?: string; end?: string }
 export type ReserveSeatInput = { requestId: string } | (SeatWindowInput & ({ seatId: number } | { seatNumber: string }) & { title?: string; memo?: string })
 type LmcCourseDownload = { courseId: string; savePath?: string } & ({ fileId: string } | { fileName: string; folderId?: string; path?: string })
@@ -163,8 +173,37 @@ export class CampusQueries {
       ebridge: { ...status(ebridge.phase), coursesAt: ebridge.coursesAt, timetableAt: ebridge.timetableAt, examsAt: ebridge.examsAt },
       // Public floor metadata being ready does not imply an authenticated session.
       library: { ...status(library.booking.phase), floorsAt: library.fetchedAt },
-      ...(this.sources.lmc ? { lmc: (() => { const state = this.sources.lmc!.getState(); return { ...status(state.phase), coursesAt: state.coursesAt, notificationsAt: state.notificationsAt } })() } : {})
+      ...(this.sources.lmc ? { lmc: (() => { const state = this.sources.lmc!.getState(); return { ...status(state.phase), coursesAt: state.coursesAt, notificationsAt: state.notificationsAt } })() } : {}),
+      ...(this.sources.mail ? { mail: (() => { const state = this.sources.mail!.getState(); return { ...status(state.phase), sendEnabled: state.sendEnabled, message: state.message } })() } : {})
     })
+  }
+
+  private mailOperation(operation: (mail: NonNullable<CampusSources['mail']>) => Promise<Record<string, unknown>>,
+    sending = false): Promise<QueryResult> {
+    return this.guarded(async () => {
+      const mail = this.sources.mail
+      if (!mail) return this.unavailable('mail', 'idle', '请在桌面应用连接西浦邮箱。', 'not_connected')
+      try {
+        const data = await operation(mail)
+        return this.result('mail', 'connected', new Date(this.now()).toISOString(), null, data)
+      } catch (error) {
+        const issue = error instanceof MailError ? error : new MailError('mail_operation_failed', '邮箱操作未完成。')
+        const data = sending ? { sent: issue.code === 'delivery_unknown' ? null : false } : null
+        return this.result('mail', mail.getState().phase, null, issue.message, data, issue.code)
+      }
+    })
+  }
+
+  getEmailList(input: MailListInput): Promise<QueryResult> {
+    return this.mailOperation(mail => mail.list(input))
+  }
+
+  getEmailInformation(input: MailLookup): Promise<QueryResult> {
+    return this.mailOperation(mail => mail.get(input))
+  }
+
+  sendEmail(input: OutgoingMail): Promise<QueryResult> {
+    return this.mailOperation(async mail => { await mail.send(input); return { sent: true } }, true)
   }
 
   refreshSource(source: CampusSource): Promise<QueryResult> {
@@ -543,6 +582,62 @@ export class CampusQueries {
       if (!this.usable(folder?.fetchedAt)) return this.unavailable(source, state.phase, issue || folder?.issue || '文件夹尚未读取。')
       return this.result(source, state.phase, folder.fetchedAt, folder.issue || issue, {
         courseId: course.id, folderId, files: folder.files.map(({ id, ...file }) => ({ fileId: id, ...file }))
+      })
+    })
+  }
+
+  getLmcGrades(input: { courseId: string; activityId?: string; refresh?: boolean }): Promise<QueryResult> {
+    return this.guarded(async () => {
+      const source = 'Learning Mall Core Grades', service = this.sources.lmc
+      if (!service) return this.unavailable(source, 'idle', 'Learning Mall Core 尚未启用。')
+      let state = service.getState()
+      const course = state.courses.find(item => item.id === input.courseId)
+      if (!course || !this.usable(state.coursesAt)) return this.unavailable(source, state.phase, '请先读取 LMC 课程列表并选择返回的 courseId。', 'course_not_found')
+      const { activityId, refresh } = input
+      let issue: string | null = null
+      if (!activityId) {
+        if (refresh || !this.usable(state.courseGrades[course.id]?.fetchedAt)) {
+          try { await this.readLive('lmc', () => service.loadCourseGrades(course.id)) }
+          catch { issue = '未能刷新课程成绩。' }
+          state = service.getState()
+        }
+        const report = state.courseGrades[course.id]
+        if (!report?.data || !this.usable(report.fetchedAt)) return state.phase === 'connected'
+          ? this.unavailable(source, state.phase, report?.issue || issue || '课程成绩暂不可读。')
+          : this.loginNeeded(source, state.phase, '请在桌面应用连接 Learning Mall Core。')
+        return this.result(source, state.phase, report.fetchedAt, report.issue || issue, { courseId: course.id, title: course.title, ...report.data })
+      }
+      if (!activityId.startsWith('activity:' + course.id + ':')) {
+        return this.unavailable(source, state.phase, '活动不属于该课程。', 'activity_not_found')
+      }
+      if (!this.usable(state.modules[course.id]?.fetchedAt)) {
+        const contents = await this.getModuleContents({ courseId: course.id })
+        if (!contents.ok) return contents
+        state = service.getState()
+      }
+      const activity = state.modules[course.id]?.activities.find(item => item.id === activityId)
+      if (!activity) return this.unavailable(source, state.phase, '未找到该课程的活动。', 'activity_not_found')
+      const hasSubmissionPage = LMC_SUBMISSION_TYPES.some(type => type === activity.type)
+      const readEvidence = () => hasSubmissionPage ? state.activityResults[activityId] : state.courseGrades[course.id]
+      if (refresh || !this.usable(readEvidence()?.fetchedAt)) {
+        try { await this.readLive('lmc', () => service.loadActivityResult(activityId, refresh)) }
+        catch { issue = '未能刷新活动成绩或提交状态。' }
+        state = service.getState()
+      }
+      const evidence = readEvidence()
+      const stamp = evidence?.fetchedAt
+      if (!this.usable(stamp)) return state.phase === 'connected'
+        ? this.unavailable(source, state.phase, evidence?.issue || issue || '活动成绩暂不可读。')
+        : this.loginNeeded(source, state.phase, '请在桌面应用连接 Learning Mall Core。')
+      const details = hasSubmissionPage ? state.activityResults[activityId]?.data : null
+      const grades = hasSubmissionPage ? [] : state.courseGrades[course.id]?.data?.rows.filter(row => row.activityId === activityId) ?? []
+      const grade = hasSubmissionPage ? details?.grade ?? null : grades.find(row => row.values.grade != null)?.values.grade ?? null
+      const gradeSource = grade === null ? null : !hasSubmissionPage ? 'course_grades' : activity.type === 'quiz' ? 'activity_page' : 'submission_page'
+      return this.result(source, state.phase, stamp, evidence?.issue || issue, {
+        courseId: course.id, activityId, title: activity.title, type: activity.type,
+        submissionStatus: details?.submissionStatus ?? null, gradingStatus: details?.gradingStatus ?? null,
+        grade, gradeSource, attempts: details?.attempts ?? [], assessmentGrades: details?.assessmentGrades ?? [],
+        grades, gradeReportFetchedAt: hasSubmissionPage ? null : stamp
       })
     })
   }

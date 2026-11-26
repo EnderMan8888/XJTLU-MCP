@@ -6,8 +6,25 @@ import type { EbridgeState } from '../shared/ebridge'
 import type { LibraryState } from '../shared/library'
 import type { McpStatus } from '../shared/mcp'
 import type { LmcState } from '../shared/lmc'
+import type { MailState } from '../shared/mail'
 
-const bridge: CampusBridge = { settings: {
+const bridge: CampusBridge = { mail: {
+  getState: () => ipcRenderer.invoke('mail:get-state'),
+  restore: () => ipcRenderer.invoke('mail:restore'),
+  open: mode => ipcRenderer.invoke('mail:open', mode),
+  list: (folder, offset) => ipcRenderer.invoke('mail:list', { folder, offset }),
+  read: id => ipcRenderer.invoke('mail:read', id),
+  disconnect: () => ipcRenderer.invoke('mail:disconnect'),
+  setSendEnabled: enabled => ipcRenderer.invoke('mail:set-send-enabled', enabled),
+  history: folder => ipcRenderer.invoke('mail:history', folder),
+  setArchiveEnabled: enabled => ipcRenderer.invoke('mail:set-archive-enabled', enabled),
+  clearArchive: () => ipcRenderer.invoke('mail:clear-archive'),
+  onState(listener) {
+    const callback = (_event: Electron.IpcRendererEvent, state: MailState): void => listener(state)
+    ipcRenderer.on('mail:state', callback)
+    return () => ipcRenderer.removeListener('mail:state', callback)
+  }
+}, settings: {
   getAutoRelogin: () => ipcRenderer.invoke('settings:get-auto-relogin'),
   setAutoRelogin: (service, enabled) => ipcRenderer.invoke('settings:set-auto-relogin', { service, enabled })
 }, lmc: {
@@ -17,6 +34,8 @@ const bridge: CampusBridge = { settings: {
   showLogin: () => ipcRenderer.invoke('lmc:show-login'),
   disconnect: () => ipcRenderer.invoke('lmc:disconnect'),
   loadCourse: id => ipcRenderer.invoke('lmc:load-course', id),
+  loadCourseGrades: id => ipcRenderer.invoke('lmc:load-course-grades', id),
+  loadActivityResult: (id, refresh) => ipcRenderer.invoke('lmc:load-activity-result', { id, refresh }),
   loadFolder: id => ipcRenderer.invoke('lmc:load-folder', id),
   loadNotifications: more => ipcRenderer.invoke('lmc:notifications', more),
   loadNotificationAttachments: notificationId => ipcRenderer.invoke('lmc:notification-attachments', notificationId),

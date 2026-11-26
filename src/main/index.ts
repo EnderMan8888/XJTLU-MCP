@@ -23,6 +23,10 @@ import { inspectDeepseekAgent, installDeepseekPlugin, saveDeepseekKey, uninstall
 import { inspectKimiAgent, installKimiCode, uninstallKimiCode } from './kimi-code'
 import { AGENT_CLIENTS } from '../shared/mcp'
 import { LmcService } from './lmc-service'
+import { MailService } from './mail-service'
+import { MailArchive } from '../infrastructure/mail-archive'
+import { MailError } from '../providers/outlook-mail'
+import type { MailReadResult } from '../shared/mail'
 import { AutoReloginStore } from '../infrastructure/auto-relogin-store'
 import { AutoRelogin } from '../services/auto-relogin'
 import { SCHOOL_SERVICES, type SchoolService } from '../shared/auto-relogin'
@@ -45,6 +49,7 @@ if (process.argv.includes(maintenanceCheck)) app.exit(singleInstance ? 0 : 2)
 else if (!singleInstance || process.argv.includes(maintenanceQuit)) app.quit()
 else {
   let main: BrowserWindow | null = null
+  let mail: MailService
   let tray: Tray | null = null
   let quitting = false
   let ams: AmsService
@@ -134,6 +139,10 @@ else {
     account.subscribe(library)
     lmc = new LmcService(state => { if (main && !main.isDestroyed()) main.webContents.send('lmc:state', state) }, account)
     account.subscribe(lmc)
+    const mailArchive = new MailArchive(userData, localCrypto)
+    await mailArchive.load()
+    mail = new MailService(account, state => { if (main && !main.isDestroyed()) main.webContents.send('mail:state', state) }, mailArchive)
+    account.subscribe(mail)
     const reloginSettings = new AutoReloginStore(userData)
     await reloginSettings.load()
     const connections = {
@@ -143,7 +152,7 @@ else {
       lmc: { phase: () => lmc.getState().phase, connect: () => lmc.connect() }
     }
     const relogin = new AutoRelogin(connections, service => reloginSettings.enabled(service))
-    const queries = new CampusQueries({ ams, ebridge, library, lmc }, Date.now, relogin)
+    const queries = new CampusQueries({ ams, ebridge, library, lmc, mail }, Date.now, relogin)
     account.subscribe({
       cancelAccountAutomation: async () => { relogin.cancelPending(); queries.cancelPending() },
       accountChanged: (previous, current) => { if (previous.username && current.username && previous.username !== current.username) queries.invalidate() }
@@ -203,6 +212,10 @@ else {
       },
       kimi: { inspect: inspectKimiAgent, install: installKimiCode, uninstall: uninstallKimiCode }
     }
+    const readMail = async <T>(operation: () => Promise<T>): Promise<MailReadResult<T>> => {
+      try { return { ok: true, value: await operation() } }
+      catch (error) { return { ok: false, message: error instanceof MailError ? error.message : '无法读取邮箱，请重试。' } }
+    }
     const handlers = {
       'settings:get-auto-relogin': () => reloginSettings.get(),
       'settings:set-auto-relogin': (value: unknown) => {
@@ -210,11 +223,37 @@ else {
         return reloginSettings.set(service, enabled)
       },
       'lmc:get-state': () => lmc.getState(),
+      'mail:restore': () => {
+        if (main && !quitting) return mail.restore(main)
+      },
+      'mail:open': (value: unknown) => {
+        if (!main || quitting) return
+        return mail.open(main, z.enum(['campus', 'manual']).parse(value))
+      },
+      'mail:get-state': () => mail.getState(),
+      'mail:list': (value: unknown) => {
+        const { folder, offset } = z.object({ folder: z.enum(['inbox', 'sentitems']), offset: z.number().int().nonnegative() }).strict().parse(value)
+        return readMail(() => mail.displayList(folder, offset))
+      },
+      'mail:read': (value: unknown) => {
+        const id = z.string().min(1).max(4096).parse(value)
+        return readMail(() => mail.displayMessage(id))
+      },
+      'mail:history': (value: unknown) => readMail(() => mail.history(z.enum(['inbox', 'sentitems']).parse(value))),
+      'mail:set-archive-enabled': (value: unknown) => mail.setArchiveEnabled(z.boolean().parse(value)),
+      'mail:clear-archive': () => mail.clearArchive(),
+      'mail:disconnect': () => mail.disconnect(),
+      'mail:set-send-enabled': (value: unknown) => mail.setSendEnabled(z.boolean().parse(value)),
       'lmc:connect': () => lmc.connect(),
       'lmc:refresh': () => refreshSchool('lmc', () => lmc.refresh(), () => lmc.refresh()),
       'lmc:show-login': () => lmc.showLogin(),
       'lmc:disconnect': () => lmc.disconnect(),
       'lmc:load-course': (id: unknown) => readSchool('lmc', () => lmc.loadCourse(id)),
+      'lmc:load-course-grades': (id: unknown) => readSchool('lmc', () => lmc.loadCourseGrades(id)),
+      'lmc:load-activity-result': (value: unknown) => {
+        const { id, refresh } = z.object({ id: z.string().max(200), refresh: z.boolean().optional() }).strict().parse(value)
+        return readSchool('lmc', () => lmc.loadActivityResult(id, refresh))
+      },
       'lmc:load-folder': (id: unknown) => readSchool('lmc', () => lmc.loadFolder(id)),
       'lmc:notifications': (value: unknown) => {
         const more = z.boolean().parse(value)
@@ -232,7 +271,7 @@ else {
       },
       'lmc:cancel-download': (id: unknown) => lmc.cancelDownload(id),
       'lmc:reveal-download': (id: unknown) => lmc.revealDownload(id),
-      'lmc:open-source': (value: unknown) => lmc.openSource(z.union([z.object({ kind: z.literal('home') }).strict(), z.object({ kind: z.enum(['course', 'activity', 'notification']), id: z.string().min(1).max(200) }).strict()]).parse(value)),
+      'lmc:open-source': (value: unknown) => lmc.openSource(z.union([z.object({ kind: z.literal('home') }).strict(), z.object({ kind: z.enum(['course', 'activity', 'notification', 'grades']), id: z.string().min(1).max(200) }).strict()]).parse(value)),
       'mcp:get-status': () => mcp.getStatus(),
       'mcp:open-codex-plugin': async () => {
         await shell.openExternal(await codexPluginLink(codexCatalog, app.getAppPath()))
@@ -355,6 +394,6 @@ else {
     tray?.destroy()
     tray = null
     void mcp?.dispose()
-    lmc?.dispose(); ams?.dispose(); ebridge?.dispose(); library?.dispose()
+    lmc?.dispose(); ams?.dispose(); ebridge?.dispose(); library?.dispose(); mail?.dispose()
   })
 }

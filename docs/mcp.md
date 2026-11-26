@@ -37,7 +37,7 @@ http_headers = { Authorization = "Bearer <从应用复制的访问密钥>" }
 
 | 工具 | 输入 | 返回内容 |
 | --- | --- | --- |
-| `get_connection_status` | `{}` | AMS、eBridge、图书馆及 LMC 的 phase、connected、needsLogin、needsVerification、操作提示及相关更新时间 |
+| `get_connection_status` | `{}` | AMS、eBridge、图书馆、LMC 和西浦邮箱的连接状态，以及邮箱发送开关 `sendEnabled` |
 | `refresh_source` | `source` 为 `ams`、`ebridge`、`library`、`lmc` | 刷新已连接的指定来源并返回各项更新时间。图书馆更新公开楼层数据 |
 | `get_modules` | `refresh?` | eBridge 当前学年的课程代码、名称、学期、学分和状态 |
 | `get_timetable` | `date?`、`refresh?` | 默认今天；指定日期的课程代码、名称、时间、教室、教学组、课程类型及教学周 |
@@ -52,7 +52,11 @@ http_headers = { Authorization = "Bearer <从应用复制的访问密钥>" }
 | `get_lmc_notification` | `from?`、`to?`（年月日）、`includeSignIn?`；或仅传 `notificationId` | 查询通知，或列出一则公告的附件和 `fileId` |
 | `list_lmc_modules` | `refresh?` | 当前可见课程的 `courseId`、课程名和简称，保持 Core 最近访问顺序 |
 | `get_module_contents` | `courseId`、`folderId?`、`refresh?` | 课程章节、活动类型和已读取到的作业时间 `assignmentDates`。指定文件夹时返回文件名、相对路径和 `fileId` |
+| `get_lmc_grades` | `courseId`、`activityId?`、`refresh?` | 当前账号的课程 Grades。指定 `activityId` 时返回活动的成绩、公开评分反馈，以及作业、测验或互评的提交状态 |
 | `download_lmc_file` | 课程资料传 `courseId` 和 `fileId`，或按 `fileName`、`folderId?`、`path?` 定位；公告附件传 `notificationId` 和 `fileId`。发起下载时可传 `savePath?`；查进度时仅传 `downloadId` | 保存 LMC 原文件，或查询下载进度和结果 |
+| `get_email_list` | `folder?` 为 `inbox`（默认）或 `sentitems`，另有 `offset?`、`limit?`（默认 20，最多 100） | 邮件 ID、主题、发件人、时间、已读状态、附件标记和下页 `nextOffset` |
+| `get_email_information` | `id`，或 `name`（完整主题）和 `folder?` | 邮件正文、发件人、收件人、抄送、密送及时间等 |
+| `send_email` | `to`、`cc?`、`bcc?` 为邮箱地址数组，另有 `subject` 和纯文本 `body` | `sent: true` 表示 Exchange 已确认，`false` 表示未发送，`null` 表示结果待核对 |
 
 调用示例：
 
@@ -80,6 +84,8 @@ http_headers = { Authorization = "Bearer <从应用复制的访问密钥>" }
 
 `get_module_contents` 的作业可包含 `assignmentDates.opens` 和 `assignmentDates.due`，保留学校显示的日期及时间文本。单项未读取到时为 `null`，两项都未读取到时省略 `assignmentDates`。
 
+`get_lmc_grades` 使用 `list_lmc_modules` 返回的 `courseId`。传入 `get_module_contents` 返回的 `activityId` 时，作业、测验和互评从活动及学校开放的提交页读取。顶层 `grade` 的来源由 `gradeSource` 标明，测验的各次得分见 `attempts`，行内 `scoreSource` 区分提交原页和作答列表。互评的单次评分见 `assessmentGrades`。单项提交的空分保留为 `null`，课程 Grades 可仅传 `courseId` 另查。
+
 课程资料先用 `list_lmc_modules` 和 `get_module_contents` 定位。按名称定位时，`path` 表示课程内的文件相对路径或资源所在章节。通知返回 `canListAttachments: true` 时，把通知的 `id` 作为 `notificationId` 单独传给 `get_lmc_notification`，即可读取附件名称和 `fileId`。
 
 如用户已指定保存位置，发起下载时可传 `savePath`。它是运行工作台的电脑上的绝对文件路径，含文件名，且父目录已存在。目标文件已存在时返回错误。省略 `savePath` 会打开桌面的保存窗口。
@@ -89,6 +95,16 @@ http_headers = { Authorization = "Bearer <从应用复制的访问密钥>" }
 ```
 
 发起下载后用返回的 `downloadId` 查询进度。仅当 `downloaded` 为 true 时表示文件已经保存。状态查询只返回文件名、进度和结果。
+
+### 西浦邮箱
+
+在桌面侧栏进入「西浦邮箱」。工作台优先复用既有会话，首次进入时尝试用已保存的账号从 `https://mail.xjtlu.edu.cn/` 登录。失败后可选「自动重试」或「手动登录」。若学校跳转到 Microsoft，可在登录窗口按页面提示继续。连接后工作台自动读取收件箱，MCP 使用同一会话。浏览器里的登录会话独立管理。
+
+工作台可开启本机历史存储。启用后，已浏览的收件箱及已发送列表、已打开的正文按邮箱分开加密保存。连接同一邮箱后，历史与学校最新结果合并显示；关闭开关会暂停存储和显示，已存数据可通过「清空已存邮件」删除。每个文件夹最多保存最近 5,000 条列表记录，已读正文有单封和总量上限。正文显示保留段落、列表、引用、粗体与表格，远程图片和邮件脚本不会加载。MCP 邮件工具查询学校邮箱并保持原有返回格式。
+
+列表默认读取收件箱。查询下一页时将 `nextOffset` 作为 `offset`。已知 ID 时直接读取正文。按主题查找默认检查收件箱和已发送邮件，重名或在扫描范围内无法确认时返回提示，请改用列表里的 ID。普通读取无需开启发送。
+
+发送默认关闭。在「账号与设置」的「西浦邮箱」区开启「允许 Agent 发送邮件」后才能发送。重启或退出邮箱会关闭开关。发送结果不明确时，先调用 `get_email_list` 检查已发送邮件，再决定是否重试。
 
 ## 结果语义
 

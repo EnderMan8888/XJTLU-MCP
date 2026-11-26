@@ -4,8 +4,9 @@ import { basename, join } from 'node:path'
 import { z } from 'zod'
 import type { AccountConsumer, AccountService } from '../services/account-service'
 import type { CredentialStatus } from '../shared/credentials'
-import { initialLmcState, LMC_ORIGIN, type LmcAssignmentDates, type LmcDownload, type LmcFile, type LmcModule, type LmcNotification, type LmcNotificationAttachment, type LmcNotificationRange, type LmcSource, type LmcState } from '../shared/lmc'
+import { initialLmcState, LMC_ORIGIN, LMC_SUBMISSION_TYPES, type LmcAssignmentDates, type LmcDownload, type LmcFile, type LmcModule, type LmcNotification, type LmcNotificationAttachment, type LmcNotificationRange, type LmcReadSnapshot, type LmcSource, type LmcState } from '../shared/lmc'
 import { cleanLmcAssignmentDates, lmcAcademicUrl, lmcAjaxScript, lmcAssignmentCardsScript, lmcAssignmentPageInspection, lmcCourseInspection, lmcDownloadAllowed, lmcFileInspection, lmcFileUrl, lmcForumAttachmentsScript, lmcForumTarget, lmcId, lmcSchoolUrl, lmcText, parseLmcCourses, parseLmcForumAttachments, parseLmcNotifications, safeLmcFilename, type LmcFilesDocument, type LmcPageDocument } from '../providers/lmc'
+import { lmcActivityResultScript, lmcAssessmentResult, lmcCourseGradesScript, lmcGradeReport } from '../providers/lmc-grades'
 import { LmcSavePathError, prepareLmcSavePath, type LmcSaveTarget } from '../infrastructure/lmc-save-path'
 import { buildAutomaticLoginScript, buildLoginInspectionScript, isAuthenticationOrigin, isCredentialPage, SCHOOL_VERIFICATION_MESSAGE } from '../security/login-policy'
 import { isAbortedNavigation, schoolLoginFailure, SCHOOL_MANUAL_LOGIN_MESSAGE, showSchoolLoginWindow } from './school-login-window'
@@ -104,6 +105,7 @@ export class LmcService implements AccountConsumer {
       this.win = null
       this.stopWatch()
       this.cancelTicket()
+      this.update({ courseGrades: {}, activityResults: {} })
       if (this.state.phase === 'manual-login-required') this.loginFailed('学校窗口已关闭。', false)
       else this.update({ phase: 'idle', message: 'LMC 学校窗口已关闭，可重新连接。' })
     })
@@ -196,8 +198,10 @@ export class LmcService implements AccountConsumer {
       const ids = new Set(courses.keys())
       // Successful course refresh drops cached modules no longer in this account's list.
       const modules = Object.fromEntries(Object.entries(this.state.modules).filter(([id]) => ids.has(id)))
+      const courseGrades = Object.fromEntries(Object.entries(this.state.courseGrades).filter(([id]) => ids.has(id)))
+      const activityResults = Object.fromEntries(Object.entries(this.state.activityResults).filter(([id]) => ids.has(id.split(':')[1])))
       for (const [id, route] of this.routes) if (!ids.has(route.courseId)) this.routes.delete(id)
-      this.update({ courses: [...courses.values()], coursesAt: new Date().toISOString(), coursesComplete: complete, modules, issues: { ...this.state.issues, courses: complete ? null : '课程列表较长，当前仅读取了部分课程。' } })
+      this.update({ courses: [...courses.values()], coursesAt: new Date().toISOString(), coursesComplete: complete, modules, courseGrades, activityResults, issues: { ...this.state.issues, courses: complete ? null : '课程列表较长，当前仅读取了部分课程。' } })
     } catch (error) { authFailed = error instanceof LmcAuthError; if (this.valid(g, win)) this.update({ issues: { ...this.state.issues, courses: '课程列表读取失败，保留上次结果。' } }) }
     if (!this.valid(g, win)) return
     if (!authFailed) { try { await this.readNotifications(g, win, false) } catch (error) { authFailed = error instanceof LmcAuthError } }
@@ -250,6 +254,43 @@ export class LmcService implements AccountConsumer {
         this.moduleState(id, { activities, folders: {}, fetchedAt: new Date().toISOString(), loading: false, issue: null })
       } catch (error) { if (this.valid(g, win)) this.moduleState(id, { loading: false, issue: '课程资料暂未读取成功，保留上次结果。' }); throw error }
     })
+  }
+  private readAssessment<T>(key: string, script: string, schema: { parse(input: unknown): T },
+    previous: LmcReadSnapshot<T> | undefined, save: (snapshot: LmcReadSnapshot<T>) => void, issue: string): Promise<void> {
+    return this.queued(key, async (g, win) => {
+      const cached = previous ?? { data: null, fetchedAt: null, loading: false, issue: null }
+      save({ ...cached, loading: true, issue: null })
+      try {
+        await this.portal(g, win)
+        const data = schema.parse(await this.readAjax(g, win, script))
+        if (this.valid(g, win)) save({ data, fetchedAt: new Date().toISOString(), loading: false, issue: null })
+      } catch (error) {
+        if (this.valid(g, win)) save({ ...cached, loading: false, issue })
+        if (error instanceof LmcAuthError) throw error
+      }
+    })
+  }
+  loadCourseGrades(input: unknown): Promise<void> {
+    this.requireWindow()
+    const id = lmcId.parse(input)
+    if (!this.state.courses.some(course => course.id === id)) throw new Error('请选择已读取的课程。')
+    return this.readAssessment('grades:' + id, lmcCourseGradesScript(id), lmcGradeReport, this.state.courseGrades[id],
+      snapshot => this.update({ courseGrades: { ...this.state.courseGrades, [id]: snapshot } }),
+      '个人成绩表暂不可读，请在学校 Grades 页面确认。')
+  }
+  async loadActivityResult(input: unknown, refreshGrades = false): Promise<void> {
+    this.requireWindow()
+    const { id, route } = this.route(input, 'activity')
+    const activity = this.state.modules[route.courseId]?.activities.find(item => item.id === id)
+    if (!activity) throw new Error('请选择课程目录中已读取的活动。')
+    const type = LMC_SUBMISSION_TYPES.find(type => type === activity.type)
+    if (type) {
+      const cmid = id.split(':')[3]
+      return this.readAssessment('result:' + id, lmcActivityResultScript(type, cmid), lmcAssessmentResult, this.state.activityResults[id],
+        snapshot => this.update({ activityResults: { ...this.state.activityResults, [id]: snapshot } }),
+        '暂未读取到提交结果，请在学校原页确认。')
+    }
+    if (refreshGrades || !this.state.courseGrades[route.courseId]?.fetchedAt) await this.loadCourseGrades(route.courseId)
   }
   private route(input: unknown, kind?: Route['kind']): { id: string; route: Route } {
     const id = z.string().max(200).parse(input), route = this.routes.get(id)
@@ -500,7 +541,11 @@ export class LmcService implements AccountConsumer {
     this.requireWindow()
     let url = `${LMC_ORIGIN}/my/`
     let assignment: { id: string; courseId: string } | undefined
-    if (source.kind === 'course') { const id = lmcId.parse(source.id); if (!this.state.courses.some(course => course.id === id)) throw new Error('Invalid course'); url = `${LMC_ORIGIN}/course/view.php?id=${id}` }
+    if (source.kind === 'course' || source.kind === 'grades') {
+      const id = lmcId.parse(source.id)
+      if (!this.state.courses.some(course => course.id === id)) throw new Error('Invalid course')
+      url = `${LMC_ORIGIN}${source.kind === 'grades' ? '/grade/report/user/index.php' : '/course/view.php'}?id=${id}`
+    }
     else if (source.kind === 'activity') {
       const { id, route } = this.route(source.id)
       url = route.url

@@ -1,9 +1,9 @@
 import { it } from 'node:test'
 import assert from 'node:assert/strict'
 import { request } from 'node:http'
-import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
+import { Client, InMemoryTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 import { CampusQueries, type CampusSources } from '../src/mcp/campus-queries.ts'
-import { MCP_TOOL_NAMES, startCampusMcp } from '../src/mcp/server.ts'
+import { createCampusMcp, MCP_TOOL_NAMES, startCampusMcp } from '../src/mcp/server.ts'
 import { initialState } from '../src/shared/ams.ts'
 import { initialEbridgeState } from '../src/shared/ebridge.ts'
 import { initialLibraryState } from '../src/shared/library.ts'
@@ -13,6 +13,8 @@ import { AgentBookings } from '../src/main/agent-bookings.ts'
 import { AutoRelogin } from '../src/services/auto-relogin.ts'
 import { defaultAutoRelogin } from '../src/shared/auto-relogin.ts'
 import { LibraryError } from '../src/providers/library.ts'
+import { MailError } from '../src/providers/outlook-mail.ts'
+import { initialMailState } from '../src/shared/mail.ts'
 
 const now = Date.parse('2026-11-17T02:00:00Z')
 const stamp = new Date(now).toISOString()
@@ -81,6 +83,24 @@ function fixture() {
           { id: folderId, title: 'Readings', section: 'Week 1', type: 'folder', fileType: '', downloadable: false },
           { id: 'activity:1:assign:3', title: 'Example assignment', section: 'Week 1', type: 'assign', fileType: '', downloadable: false, assignmentDates: { opens: null, due: '16 November 2026, 11:55 PM' } }
         ], folders: {}, fetchedAt: stamp, loading: false, issue: null }
+      },
+      async loadCourseGrades(id) {
+        lmc.courseGrades[id] = {
+          fetchedAt: stamp, issue: null, loading: false,
+          data: {
+            columns: [{ key: 'grade', label: 'Grade' }],
+            rows: [
+              { title: 'Example assignment', kind: 'item', activityId: 'activity:1:assign:3', values: { grade: '0' } },
+              { title: 'Course total', kind: 'total', activityId: null, values: { grade: null } }
+            ]
+          }
+        }
+      },
+      async loadActivityResult(id) {
+        lmc.activityResults[id] = {
+          fetchedAt: stamp, issue: null, loading: false,
+          data: { submissionStatus: 'Submitted for grading', gradingStatus: 'Graded', grade: null, attempts: [] }
+        }
       },
       async loadFolder(id) {
         lmc.modules['1'].folders[id] = { files: [{ id: fileId, name: 'Example.pdf', path: 'Reading/Example.pdf', extension: 'pdf' }], fetchedAt: stamp, loading: false, issue: null }
@@ -311,8 +331,57 @@ function post(url: string, headers: Record<string, string>, body = '{}'): Promis
   })
 }
 
-it('authenticates and calls all sixteen workbook tools through the official client', async t => {
+it('LMC grades tool keeps the course report separate from a submission grade', async t => {
+  const f = fixture()
+  f.lmc.phase = 'connected'
+  await f.sources.lmc!.refresh()
+  const server = createCampusMcp(f.queries, '1.0.0')
+  const client = new Client({ name: 'lmc-grades-test', version: '1.0.0' })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  t.after(async () => { await client.close(); await server.close() })
+  await server.connect(serverTransport)
+  await client.connect(clientTransport)
+  const tool = (await client.listTools()).tools.find(item => item.name === 'get_lmc_grades')
+  assert.equal(tool?.annotations?.readOnlyHint, true)
+  const call = async (args: Record<string, string>) => {
+    const result = await client.callTool({ name: 'get_lmc_grades', arguments: args })
+    assert.equal(result.isError, false)
+    return (result.structuredContent as { data: Record<string, any> }).data
+  }
+  const activityId = 'activity:1:assign:3'
+  const submission = await call({ courseId: '1', activityId })
+  assert.equal(submission.submissionStatus, 'Submitted for grading')
+  assert.equal(submission.grade, null)
+  assert.equal(f.lmc.courseGrades['1'], undefined)
+  const report = await call({ courseId: '1' })
+  assert.equal(report.rows[0].values.grade, '0')
+  assert.equal(report.rows[1].values.grade, null)
+  const result = await call({ courseId: '1', activityId })
+  assert.equal(result.grade, null)
+  assert.equal(result.gradeSource, null)
+  assert.deepEqual(result.grades, [])
+  f.lmc.activityResults[activityId].data!.grade = '0 / 100'
+  const graded = await call({ courseId: '1', activityId })
+  assert.equal(graded.grade, '0 / 100')
+  assert.equal(graded.gradeSource, 'submission_page')
+  const wrongActivity = await client.callTool({ name: 'get_lmc_grades', arguments: { courseId: '1', activityId: 'activity:2:assign:3' } })
+  assert.equal(wrongActivity.isError, true)
+})
+
+it('authenticates and calls all workbook tools through the official client', async t => {
   const f = fixture(), token = 'a'.repeat(64)
+  let sendEnabled = false
+  let sentCount = 0
+  f.sources.mail = {
+    getState: () => ({ ...initialMailState, phase: 'connected', message: 'Demo connected', sendEnabled }),
+    async list(input) { assert.equal(input.folder, 'inbox'); return { messages: [{ id: 'demo-id', subject: 'Demo' }], nextOffset: null } },
+    async get(input) { assert.deepEqual(input, { name: 'Demo' }); return { id: 'demo-id', body: 'Demo body' } },
+    async send(input) {
+      if (!sendEnabled) throw new MailError('send_disabled', 'Sending is disabled')
+      assert.deepEqual(input, { to: ['to@example.com'], cc: ['cc@example.com'], bcc: ['bcc@example.com'], subject: 'Demo', body: 'Demo body' })
+      sentCount++
+    }
+  }
   f.library.booking.phase = f.lmc.phase = 'connected'
   f.ebridge.coursesAt = stamp
   f.ebridge.courses = [
@@ -326,8 +395,8 @@ it('authenticates and calls all sixteen workbook tools through the official clie
   t.after(() => client.close())
   const tools = await client.listTools()
   assert.deepEqual(tools.tools.map(tool => tool.name), [...MCP_TOOL_NAMES])
-  assert.equal(tools.tools.length, 16)
-  assert.deepEqual(tools.tools.filter(tool => !tool.annotations?.readOnlyHint).map(tool => tool.name), ['reserve_library_seat', 'download_lmc_file'])
+  assert.equal(tools.tools.length, 20)
+  assert.deepEqual(tools.tools.filter(tool => !tool.annotations?.readOnlyHint).map(tool => tool.name), ['reserve_library_seat', 'download_lmc_file', 'send_email'])
   async function call(name: typeof MCP_TOOL_NAMES[number], args: Record<string, unknown> = {}) {
     const result = await client.callTool({ name, arguments: args })
     assert.equal(result.isError, false, name)
@@ -395,6 +464,17 @@ it('authenticates and calls all sixteen workbook tools through the official clie
   assert.equal(bypass.isError, true)
   const unlistedFile = await client.callTool({ name: 'download_lmc_file', arguments: { courseId: '1', fileId: 'https://example.invalid/file.pdf' } })
   assert.equal((unlistedFile.structuredContent as Record<string, unknown>)?.code, 'file_not_found')
+  assert.equal((await call('get_connection_status')).data.mail.sendEnabled, false)
+  assert.equal((await call('get_email_list', { folder: 'inbox' })).data.messages[0].id, 'demo-id')
+  assert.equal((await call('get_email_information', { name: 'Demo' })).data.body, 'Demo body')
+  assert.equal((await client.callTool({ name: 'get_email_information', arguments: { name: 'Demo', id: 'demo-id' } })).isError, true)
+  const outgoing = { to: ['to@example.com'], cc: ['cc@example.com'], bcc: ['bcc@example.com'], subject: 'Demo', body: 'Demo body' }
+  const disabled = await client.callTool({ name: 'send_email', arguments: outgoing })
+  assert.equal((disabled.structuredContent as Record<string, unknown>)?.code, 'send_disabled')
+  assert.equal(sentCount, 0)
+  sendEnabled = true
+  assert.equal((await call('send_email', outgoing)).data.sent, true)
+  assert.equal(sentCount, 1)
 })
 
 it('MCP rejects unauthenticated, cross-origin, rebinding, oversized, and credential-in-URL requests', async t => {
@@ -467,7 +547,7 @@ it('MCP service copies configuration through the main process and revokes old ke
   for (const { url, auth } of clientConfigs) {
     const client = await connect(url, auth.slice('Bearer '.length))
     try {
-      assert.equal((await client.listTools()).tools.length, 16)
+      assert.equal((await client.listTools()).tools.length, MCP_TOOL_NAMES.length)
       const status = await client.callTool({ name: 'get_connection_status', arguments: {} })
       assert.equal((status.structuredContent as { ok?: boolean } | undefined)?.ok, true)
     } finally {
@@ -480,7 +560,7 @@ it('MCP service copies configuration through the main process and revokes old ke
   service.copyConfig('bearer', text => { copied = text })
   assert.equal(copied, `Bearer ${token}`)
   const connector = await connect(connectorUrl, copied.slice('Bearer '.length))
-  assert.equal((await connector.listTools()).tools.length, 16)
+  assert.equal((await connector.listTools()).tools.length, MCP_TOOL_NAMES.length)
   const connectorStatus = await connector.callTool({ name: 'get_connection_status', arguments: {} })
   assert.equal((connectorStatus.structuredContent as { ok?: boolean } | undefined)?.ok, true)
   await connector.close()

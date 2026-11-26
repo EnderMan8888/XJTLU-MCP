@@ -18,6 +18,23 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - name: Check app and Agent versions
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($lock.version -ne $version -or $lock.packages[''].version -ne $version) {
+            throw "package-lock.json must use the app version $version"
+          }
+          $agentManifests = @(
+            'codex-plugin/plugins/xjtlu-campus/.codex-plugin/plugin.json',
+            'src/main/assets/deepseek-harness/xjtlu-mcp/package.json'
+          )
+          foreach ($manifest in $agentManifests) {
+            if ((Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).version -ne $version) {
+              throw "$manifest must use the app version $version"
+            }
+          }
       - name: Install locked dependencies
         run: npm ci
       - name: Install Electron runtime on build runner

@@ -8,11 +8,37 @@ html,body,#root{height:100%;overflow:hidden}
 .shell>main{display:flex;flex-direction:column;min-height:0;height:100%;overflow:hidden}
 .topbar{flex:0 0 69px}
 .page-scroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
-.auto-relogin { margin-top: 16px; }
-.auto-relogin-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; border-top: 1px solid #e8edf5; font-weight: 600; cursor: pointer; }
-.auto-relogin-row input { appearance: none; position: relative; flex: 0 0 40px; width: 40px; height: 22px; margin: 0; border: 1px solid #9ca9bf; border-radius: 12px; background: #d8e0ec; cursor: inherit; }
-.auto-relogin-row input::before { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; }
-.auto-relogin-row input:checked { border-color: #3455ad; background: #3455ad; }
-.auto-relogin-row input:checked::before { transform: translateX(18px); }
-.auto-relogin-row input:focus-visible { outline: 2px solid #3455ad; outline-offset: 3px; }
-.auto-relogin-row input:disabled { opacity: .6; cursor: wait; }
+
+.account-card { --account-inset: 24px; }
+.account-card + .account-card { margin-top: 16px; }
+.account-intro { padding: 22px var(--account-inset) 18px; }
+.account-intro h2 { margin: 0 0 8px; }
+.account-intro p { margin: 0; color: #8b98ae; font-size: 11px; line-height: 1.6; }
+.account-card .credential-panel { padding: 16px var(--account-inset); }
+.account-card .credential-panel > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.account-card .credential-unavailable { padding-inline: var(--account-inset); }
+.account-card > .notice { margin: 0 var(--account-inset) 16px; }
+
+.account-toggle-row, .account-archive-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 48px;
+  padding: 10px var(--account-inset);
+  border-top: 1px solid #edf0f6;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.account-toggle-row { cursor: pointer; }
+.account-setting-text > small { display: block; margin-top: 4px; font-size: 11px; font-weight: 400; color: #72819b; }
+.account-archive-action > span { color: #519b7d; }
+.account-archive-action > button { flex-shrink: 0; padding: 8px 11px; font-size: 11px; }
+.account-toggle-row input { appearance: none; position: relative; flex: 0 0 40px; width: 40px; height: 22px; margin: 0; border: 1px solid #9ca9bf; border-radius: 12px; background: #d8e0ec; cursor: inherit; }
+.account-toggle-row input::before { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; }
+.account-toggle-row input:checked { border-color: #3455ad; background: #3455ad; }
+.account-toggle-row input:checked::before { transform: translateX(18px); }
+.account-toggle-row input:focus-visible { outline: 2px solid #3455ad; outline-offset: 3px; }
+.account-toggle-row input:disabled { opacity: .6; }
+.account-toggle-row:has(input:disabled) { cursor: not-allowed; }
